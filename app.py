@@ -13,8 +13,9 @@ import streamlit as st
 from demo_data import CATEGORIES, WEEKDAYS, build_demo, next_month
 from planner import PlanResult, solve_month, validate_dataset
 import store
+import catalog
 
-st.set_page_config(page_title="Controleursplanning | v0.2", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.3", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -71,6 +72,29 @@ if PERSISTENT:
                 st.rerun()
             else:
                 st.error("Aanmelden mislukt. Controleer je gegevens of probeer later opnieuw.")
+        # Eenmalig herstel is uitsluitend beschikbaar wanneer de beheerder
+        # zelf een lange willekeurige sleutel in de externe Secrets activeert.
+        recovery_key = setting("ADMIN_RECOVERY_KEY")
+        if recovery_key:
+            with st.expander("🔑 Beheerderswachtwoord eenmalig herstellen"):
+                st.caption("Alleen voor de beheerder van deze testomgeving. Deze herstelcode werkt slechts één keer.")
+                with st.form("admin_recovery_form", clear_on_submit=True):
+                    admin_id = st.text_input("Personeelsnummer van de beheerder", max_chars=64)
+                    typed_key = st.text_input("Eenmalige herstelcode", type="password")
+                    fresh_password = st.text_input("Nieuw wachtwoord (minimaal 14 tekens)", type="password")
+                    confirm_password = st.text_input("Herhaal nieuw wachtwoord", type="password")
+                    restore = st.form_submit_button("Beheerderswachtwoord herstellen")
+                if restore:
+                    try:
+                        if fresh_password != confirm_password:
+                            raise ValueError("De nieuwe wachtwoorden komen niet overeen.")
+                        store.recover_admin_once(engine, admin_id.strip(), typed_key,
+                                                 fresh_password, recovery_key)
+                        st.success("Wachtwoord hersteld. Meld je hierboven aan met je nieuwe wachtwoord. Verwijder nu ADMIN_RECOVERY_KEY uit Streamlit Secrets.")
+                    except ValueError as error:
+                        st.error(str(error))
+                    except Exception:
+                        st.error("Herstel mislukt. Controleer de gegevens en de databaseverbinding.")
         st.info("Deze proefversie mag uitsluitend met fictieve gegevens worden gebruikt.")
         st.stop()
 
@@ -174,7 +198,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.2 • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.3 • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -237,109 +261,169 @@ if screen == "Overzicht":
 - Met OR-Tools een maandplanning berekenen, rekening houdend met beschikbare basisregels.
 - Een gedeeltelijke planning met openstaande dienstplaatsen tonen en naar Excel exporteren.
 
-**In v0.2:** aanmelden met personeelsnummer, afzonderlijke rollen, gedeelde PostgreSQL-gegevens, auditlog en conceptplanning/publicatie in testmodus. Zonder ingestelde DATABASE_URL blijft de oude demomodus beschikbaar.
+**In v0.3:** uitgebreid controleurs- en dienstenbeheer met team, tijdelijke blokkeringen en begin-/eindlocatie. Sinds v0.2: aanmelden met personeelsnummer, afzonderlijke rollen, gedeelde PostgreSQL-gegevens, auditlog en conceptplanning/publicatie in testmodus. Zonder ingestelde DATABASE_URL blijft de oude demomodus beschikbaar.
 
 **Nog niet gebouwd:** ruilaanvragen, taakbeheer, goedkeuringsstromen, wettelijke validatie, teams, controles over maandgrenzen en automatische back-ups. Deze onderdelen volgen in latere versies.""")
 
 elif screen == "Controleurs":
-    st.subheader("Controleurs beheren")
-    st.dataframe(pd.DataFrame([{"Personeelsnr": e["id"], "Naam": e["name"], "Regime %": e["contract_percent"],
-                                 "Max. uren/maand": e["max_month_hours"], "Niet toegestaan": ", ".join(e["blocked_categories"]),
-                                 "Voorkeur": e["preferred_category"], "Actief": e.get("active", True)}
-                                for e in data["employees"]]), use_container_width=True, hide_index=True)
-    tab_add, tab_edit = st.tabs(["Controleur toevoegen", "Profiel aanpassen"])
+    st.subheader("Controleursbeheer")
+    st.caption("Profielen zijn gekoppeld aan het unieke personeelsnummer. Reeds aangemaakte profielen deactiveren we in plaats van ze te verwijderen.")
+    records = [catalog.profile(e) for e in data["employees"]]
+    st.dataframe(pd.DataFrame([{
+        "Personeelsnr": e["id"], "Naam": e["name"], "Team": e["team"],
+        "Regime %": e["contract_percent"], "Max. maanduren": e["max_month_hours"],
+        "Verboden categorieën": ", ".join(e["blocked_categories"]),
+        "Geblokkeerde periodes": len(e["blocked_periods"]), "Actief": e["active"]
+    } for e in records]), use_container_width=True, hide_index=True)
+    tab_add, tab_edit, tab_periods = st.tabs(["Nieuwe controleur", "Profiel en beperkingen", "Tijdelijke onbeschikbaarheid"])
     with tab_add:
-        with st.form("create_emp"):
-            id_ = st.text_input("Uniek testpersoneelsnummer", placeholder="DEMO017")
-            name = st.text_input("Naam", placeholder="Testcontroleur 17")
-            col1, col2 = st.columns(2)
-            with col1:
+        with st.form("create_emp", clear_on_submit=True):
+            id_ = st.text_input("Uniek testpersoneelsnummer", placeholder="DEMO017", max_chars=64)
+            name = st.text_input("Naam", placeholder="Testcontroleur 17", max_chars=160)
+            team = st.text_input("Team / werkgebied", value="Demoteam", max_chars=80)
+            c1, c2 = st.columns(2)
+            with c1:
                 contract = st.number_input("Arbeidsregime (%)", 1, 100, 100, key="new_contract")
-            with col2:
-                max_hours = st.number_input("Max. uren per maand", 1, 250, 176, key="new_max_hours")
-            if st.form_submit_button("Toevoegen"):
-                if not id_.strip() or not name.strip():
-                    st.error("Vul een personeelsnummer en naam in.")
-                elif any(e["id"] == id_.strip() for e in data["employees"]):
+            with c2:
+                max_hours = st.number_input("Maximum in te plannen uren / maand", 1, 250, 176, key="new_max_hours")
+            if st.form_submit_button("Controleur toevoegen"):
+                state = clone()
+                identifier = id_.strip()
+                if identifier in {e["id"] for e in state["employees"]}:
                     st.error("Dit personeelsnummer bestaat al.")
                 else:
-                    state = clone()
-                    state["employees"].append({"id": id_.strip(), "name": name.strip(), "contract_percent": contract,
-                                                "max_month_hours": int(max_hours), "max_consecutive": None,
-                                                "blocked_categories": [], "blocked_shifts": [], "blocked_weekdays": [],
-                                                "preferred_category": "Geen", "active": True})
-                    replace_and_rerun(state)
+                    candidate = catalog.new_employee(identifier, name, team, contract, max_hours)
+                    issues = catalog.validate_employee(candidate, {s["id"] for s in data["shifts"]})
+                    if issues:
+                        for issue in issues:
+                            st.error(issue)
+                    else:
+                        state["employees"].append(candidate)
+                        replace_and_rerun(state)
     with tab_edit:
         if data["employees"]:
-            selected_id = st.selectbox("Controleur", [e["id"] for e in data["employees"]],
-                                       format_func=lambda i: next(e["name"] for e in data["employees"] if e["id"] == i))
-            emp = next(e for e in data["employees"] if e["id"] == selected_id)
+            selected_id = st.selectbox("Controleur kiezen", [e["id"] for e in data["employees"]],
+                                       format_func=lambda i: next(e["name"] for e in data["employees"] if e["id"] == i),
+                                       key="edit_employee_id")
+            emp = catalog.profile(next(e for e in data["employees"] if e["id"] == selected_id))
             with st.form("edit_emp"):
-                name = st.text_input("Naam", value=emp["name"])
+                name = st.text_input("Naam", value=emp["name"], max_chars=160)
+                team = st.text_input("Team / werkgebied", value=emp["team"], max_chars=80)
                 col1, col2 = st.columns(2)
                 with col1:
                     contract = st.number_input("Arbeidsregime (%)", 1, 100, int(emp["contract_percent"]))
-                    max_hours = st.number_input("Max. uren per maand", 1, 250, int(emp["max_month_hours"]))
+                    max_hours = st.number_input("Maximum in te plannen maanduren", 1, 250, int(emp["max_month_hours"]))
                     preferred = st.selectbox("Zachte voorkeurscategorie", ["Geen", *CATEGORIES],
-                                             index=["Geen", *CATEGORIES].index(emp.get("preferred_category", "Geen")))
+                                             index=["Geen", *CATEGORIES].index(emp["preferred_category"]))
                 with col2:
-                    blocked_cats = st.multiselect("Verboden categorieën", CATEGORIES, default=emp.get("blocked_categories", []))
-                    blocked_shift = st.multiselect("Verboden dienstnummers", [s["id"] for s in data["shifts"]],
-                                                   default=[x for x in emp.get("blocked_shifts", []) if x in {s["id"] for s in data["shifts"]}])
-                    weekdays = st.multiselect("Niet inzetbaar op", list(range(7)),
-                                              default=emp.get("blocked_weekdays", []), format_func=lambda x: WEEKDAYS[x])
-                limit = st.number_input("Individueel maximum opeenvolgende werkdagen (0 = algemeen)", 0, 7,
-                                        int(emp.get("max_consecutive") or 0))
-                active = st.checkbox("Actieve controleur", value=emp.get("active", True))
-                if st.form_submit_button("Profiel opslaan"):
+                    blocked_cats = st.multiselect("Verboden dienstcategorieën", CATEGORIES,
+                                                   default=emp["blocked_categories"])
+                    blocked_shifts = st.multiselect("Verboden dienstnummers", [s["id"] for s in data["shifts"]],
+                                                   default=emp["blocked_shifts"])
+                    blocked_weekdays = st.multiselect("Niet beschikbaar op deze weekdagen", list(range(7)),
+                                                      default=emp["blocked_weekdays"], format_func=lambda n: WEEKDAYS[n])
+                individual_limit = st.number_input("Max. opeenvolgende werkdagen (0 = algemene regel)", 0, 7,
+                                                   int(emp["max_consecutive"] or 0))
+                active = st.checkbox("Controleur actief", value=bool(emp["active"]))
+                st.caption("Deze beperkingen zijn verplicht voor de solver. De voorkeur voor een dienstcategorie is een zachte wens.")
+                if st.form_submit_button("Profiel bewaren"):
                     state = clone()
                     target = next(e for e in state["employees"] if e["id"] == selected_id)
-                    target.update({"name": name, "contract_percent": contract, "max_month_hours": int(max_hours),
+                    target.update({"name": name.strip(), "team": team.strip(),
+                                   "contract_percent": int(contract), "max_month_hours": int(max_hours),
                                    "preferred_category": preferred, "blocked_categories": blocked_cats,
-                                   "blocked_shifts": blocked_shift, "blocked_weekdays": weekdays,
-                                   "max_consecutive": limit or None, "active": active})
+                                   "blocked_shifts": blocked_shifts, "blocked_weekdays": blocked_weekdays,
+                                   "max_consecutive": int(individual_limit) or None, "active": active})
+                    replace_and_rerun(state)
+    with tab_periods:
+        if data["employees"]:
+            selected_id = st.selectbox("Controleur", [e["id"] for e in data["employees"]],
+                                       format_func=lambda i: next(e["name"] for e in data["employees"] if e["id"] == i),
+                                       key="period_employee_id")
+            emp = catalog.profile(next(e for e in data["employees"] if e["id"] == selected_id))
+            st.caption("Harde, tijdelijke blokkering: de controleur mag op deze datums niet worden ingepland. Geen verwerking van verlofrechten of medische informatie.")
+            periods = emp["blocked_periods"]
+            if periods:
+                st.dataframe(pd.DataFrame([{"Vanaf": p["start"], "Tot en met": p["end"]} for p in periods]),
+                             use_container_width=True, hide_index=True)
+            else:
+                st.info("Voor deze testcontroleur zijn nog geen tijdelijke periodes geblokkeerd.")
+            with st.form("add_period"):
+                start_date = st.date_input("Vanaf", value=date(int(data["year"]), int(data["month"]), 1), key="period_start")
+                end_date = st.date_input("Tot en met", value=date(int(data["year"]), int(data["month"]), 1), key="period_end")
+                if st.form_submit_button("Onbeschikbare periode toevoegen"):
+                    state = clone()
+                    target = next(e for e in state["employees"] if e["id"] == selected_id)
+                    combined = list(target.get("blocked_periods", [])) + [{"start": start_date.isoformat(), "end": end_date.isoformat()}]
+                    issues = catalog.validate_periods(combined)
+                    if issues:
+                        for issue in issues:
+                            st.error(issue)
+                    else:
+                        target["blocked_periods"] = sorted(combined, key=lambda p: (p["start"], p["end"]))
+                        replace_and_rerun(state)
+            if periods:
+                to_remove = st.selectbox("Periode verwijderen", range(len(periods)),
+                                         format_func=lambda i: f"{periods[i]['start']} t/m {periods[i]['end']}",
+                                         key="remove_period")
+                if st.button("Geselecteerde periode verwijderen", type="secondary"):
+                    state = clone()
+                    target = next(e for e in state["employees"] if e["id"] == selected_id)
+                    target["blocked_periods"].pop(to_remove)
                     replace_and_rerun(state)
 
 elif screen == "Diensten":
     st.subheader("Dienstencatalogus")
-    st.dataframe(pd.DataFrame(data["shifts"]), hide_index=True, use_container_width=True)
-    st.caption("Een dienstnummer heeft vaste begin- en einduren. Een nachtdienst mag over middernacht lopen.")
+    st.caption("Een dienstnummer heeft vaste werkuren en een vast benodigd aantal controleurs. Een nachtdienst mag over middernacht lopen.")
+    st.dataframe(pd.DataFrame([{
+        "Dienstnummer": s["id"], "Omschrijving": s["name"], "Categorie": s["category"],
+        "Begin": s["start"], "Einde": s["end"], "Bezetting": s["required"],
+        "Beginlocatie": s["start_location"], "Eindlocatie": s["end_location"], "Actief": s["active"]
+    } for s in (catalog.shift_details(sh) for sh in data["shifts"])]),
+        hide_index=True, use_container_width=True)
     mode = st.radio("Bewerking", ["Bestaande dienst wijzigen", "Dienst toevoegen"], horizontal=True)
     selected = st.selectbox("Dienstnummer", [s["id"] for s in data["shifts"]]) if mode.startswith("Bestaande") and data["shifts"] else None
-    sh = next((s for s in data["shifts"] if s["id"] == selected), None)
+    sh = catalog.shift_details(next(s for s in data["shifts"] if s["id"] == selected)) if selected else None
     with st.form("shift_form"):
-        code = st.text_input("Dienstnummer", value=sh["id"] if sh else "", disabled=bool(sh))
-        name = st.text_input("Omschrijving", value=sh["name"] if sh else "")
-        cat = st.selectbox("Categorie", CATEGORIES, index=CATEGORIES.index(sh["category"]) if sh else 0)
+        code = st.text_input("Dienstnummer", value=sh["id"] if sh else "", disabled=bool(sh), max_chars=40)
+        name = st.text_input("Omschrijving", value=sh["name"] if sh else "", max_chars=160)
+        cat = st.selectbox("Dienstcategorie", CATEGORIES, index=CATEGORIES.index(sh["category"]) if sh else 0)
         col1, col2, col3 = st.columns(3)
         with col1:
             start = st.text_input("Beginuur (UU:MM)", value=sh["start"] if sh else "08:00")
         with col2:
             end = st.text_input("Einduur (UU:MM)", value=sh["end"] if sh else "16:00")
         with col3:
-            required = st.number_input("Standaard bezetting", 0, 50, int(sh["required"]) if sh else 1)
-        location = st.text_input("Locatie", value=sh["location"] if sh else "Demo Gent")
-        active = st.checkbox("Actief", value=sh.get("active", True) if sh else True)
-        if st.form_submit_button("Dienst opslaan"):
-            import re
-            if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", start) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", end):
-                st.error("Gebruik voor begin- en einduur het formaat UU:MM.")
-            elif not code.strip() or not name.strip():
-                st.error("Dienstnummer en omschrijving zijn verplicht.")
-            elif not sh and any(s["id"] == code.strip() for s in data["shifts"]):
-                st.error("Dit dienstnummer bestaat al.")
+            required = st.number_input("Vaste bezetting", 0, 50, int(sh["required"]) if sh else 1)
+        col4, col5 = st.columns(2)
+        with col4:
+            start_location = st.text_input("Beginlocatie", value=sh["start_location"] if sh else "Demo Gent", max_chars=120)
+        with col5:
+            end_location = st.text_input("Eindlocatie", value=sh["end_location"] if sh else "Demo Gent", max_chars=120)
+        active = st.checkbox("Dienst actief", value=sh["active"] if sh else True)
+        st.caption("Begin- en eindlocaties worden bewaard en getoond; verplaatsingstijden worden in deze versie nog niet berekend.")
+        if st.form_submit_button("Dienst bewaren"):
+            state = clone()
+            entry = {"id": code.strip(), "name": name.strip(), "category": cat, "start": start.strip(),
+                     "end": end.strip(), "required": int(required),
+                     "location": start_location.strip(), "start_location": start_location.strip(),
+                     "end_location": end_location.strip(), "active": active}
+            issues = catalog.validate_shift(entry)
+            if not sh and any(s["id"] == entry["id"] for s in state["shifts"]):
+                issues.append("Dit dienstnummer bestaat al.")
+            if not active and any(r["shift_id"] == entry["id"] for r in state["demand"]):
+                issues.append("Deze dienst staat nog in de maandbehoefte. Verwijder hem daar eerst voordat je hem deactiveert.")
+            if issues:
+                for issue in issues:
+                    st.error(issue)
             else:
-                state = clone()
-                entry = {"id": code.strip(), "name": name.strip(), "category": cat, "start": start,
-                         "end": end, "required": int(required), "location": location, "active": active}
                 if sh:
-                    state["shifts"] = [entry if s["id"] == selected else s for s in state["shifts"]]
-                    for req in state["demand"]:
-                        if req["shift_id"] == selected:
-                            req["required"] = int(required)
+                    state["shifts"] = [dict(existing, **entry) if existing["id"] == selected else existing for existing in state["shifts"]]
+                    catalog.sync_required(state, selected, int(required))
                 else:
                     state["shifts"].append(entry)
                 replace_and_rerun(state)
+    st.info("Bij wijziging van de vaste bezetting passen we de behoefte voor de actieve maand aan. Eerder opgeslagen planningsversies blijven bewaard als historisch resultaat; bereken een nieuwe conceptplanning om de gewijzigde diensturen te verwerken.")
 
 elif screen == "Maandbehoefte":
     st.subheader("Welke dienstnummers zijn op welke dagen nodig?")
@@ -353,7 +437,7 @@ elif screen == "Maandbehoefte":
         if st.form_submit_button("Andere testmaand starten (wist huidige demo-invoer)"):
             if (year, month) != (data["year"], data["month"]):
                 replace_and_rerun(build_demo(int(year), int(month)))
-    st.caption("Let op: in v0.2 is maar één testmaand tegelijk bewerkbaar. Exporteer eerst je JSON vóór je de maand wijzigt.")
+    st.caption("Let op: in v0.3 is nog maar één testmaand tegelijk bewerkbaar. Exporteer eerst je JSON vóór je de maand wijzigt.")
     st.dataframe(pd.DataFrame(data["demand"]), hide_index=True, use_container_width=True, height=300)
     with st.form("demand_form"):
         a,b,c = st.columns(3)
@@ -557,7 +641,7 @@ elif screen == "Mijn planning":
         eid = current_user["employee_id"]
         own = [a for a in published["payload"]["assignments"] if a["Personeelsnr"] == eid]
         st.caption(f"Gepubliceerde testversie #{published['id']} • {data['month']:02d}/{data['year']}")
-        st.dataframe(pd.DataFrame(own, columns=["Datum", "Dienstnummer", "Categorie", "Begin", "Einde", "Uren"]),
+        st.dataframe(pd.DataFrame(own, columns=["Datum", "Dienstnummer", "Categorie", "Begin", "Einde", "Beginlocatie", "Eindlocatie", "Uren"]),
                      hide_index=True, use_container_width=True)
         if not own:
             st.info("Voor deze maand zijn nog geen diensten aan jouw testaccount toegewezen.")

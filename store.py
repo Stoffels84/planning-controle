@@ -5,6 +5,8 @@ Geen echte personeelsgegevens gebruiken op gratis Community Cloud zonder goedkeu
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
 from typing import Any
 
 from argon2 import PasswordHasher
@@ -57,6 +59,14 @@ class PlanningVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class UsedRecoveryKey(Base):
+    """Eenmalige herstelcodes: alleen een SHA-256-vingerafdruk, nooit de code zelf."""
+    __tablename__ = "used_recovery_keys"
+    key_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    admin_id: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
 class AuditEvent(Base):
@@ -240,6 +250,37 @@ def reset_password(engine, employee_id: str, new_password: str, actor: str) -> N
         a.failed_logins = 0
         a.locked_until = None
         _audit(s, actor, f"Wachtwoord opnieuw ingesteld: {employee_id}")
+
+
+def recover_admin_once(engine, employee_id: str, entered_key: str, new_password: str,
+                       configured_key: str) -> None:
+    """Herstel één bestaande beheerder met een eenmalig geheim uit Streamlit Secrets.
+
+    De sleutel wordt nooit gelogd of in leesbare vorm in de database opgeslagen.
+    Alleen het accountwachtwoord en de blokkadestatus worden gewijzigd; alle andere
+    bedrijfsgegevens blijven ongemoeid.
+    """
+    if len(configured_key) < 32:
+        raise ValueError("De herstelcode in Streamlit Secrets moet minstens 32 tekens lang zijn.")
+    if not hmac.compare_digest(entered_key.encode("utf-8"), configured_key.encode("utf-8")):
+        raise ValueError("Herstelcode onjuist.")
+    check_password_strength(new_password)
+    digest = hashlib.sha256(configured_key.encode("utf-8")).hexdigest()
+
+    with session_factory(engine).begin() as s:
+        if s.get(UsedRecoveryKey, digest) is not None:
+            raise ValueError("Deze herstelcode is al gebruikt. Verwijder hem uit Streamlit Secrets.")
+        # Toewijzing en codeverbruik gebeuren in één database-transactie.
+        admin = s.scalar(select(Account).where(Account.employee_id == employee_id).with_for_update())
+        if admin is None or admin.role != "admin" or not admin.active:
+            raise ValueError("Geen actief beheerdersaccount gevonden met dit personeelsnummer.")
+        s.add(UsedRecoveryKey(key_digest=digest, used_at=now(), admin_id=employee_id))
+        s.flush()  # Unieke sleutel voorkomt gelijktijdig hergebruik.
+        admin.password_hash = HASHER.hash(new_password)
+        admin.must_change_password = False
+        admin.failed_logins = 0
+        admin.locked_until = None
+        _audit(s, employee_id, "Eenmalig beheerderswachtwoord hersteld")
 
 
 def change_password(engine, employee_id: str, old_password: str, new_password: str) -> None:

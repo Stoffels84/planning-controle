@@ -7,7 +7,7 @@ from demo_data import build_demo
 from store import (
     ConflictError, add_account, authenticate, change_password, get_engine,
     initialize, load_plan, load_workspace, lookup_account, publish_plan,
-    reset_password, save_plan, save_workspace, set_account_state,
+    reset_password, recover_admin_once, save_plan, save_workspace, set_account_state,
 )
 
 
@@ -82,3 +82,39 @@ def test_planning_draft_and_explicit_publication(tmp_path):
     save_workspace(db, changed, rev, "TESTADMIN", "Instelling gewijzigd")
     with pytest.raises(ConflictError):
         publish_plan(db, pid, rev, "TESTADMIN")
+
+
+def test_one_time_recovery_preserves_database(tmp_path):
+    """Bestaande medewerker, voorkeuren en planning blijven behouden."""
+    db = setup_db(tmp_path)
+    add_account(db, "DEMO001", "Testcontroleur", "controleur", "ControleurSterkWachtwoord1!", "TESTADMIN")
+    original, revision = load_workspace(db)
+    old = authenticate(db, "TESTADMIN", "TijdelijkVoorbeeld2026!sterk")
+    plan_id = save_plan(db, original, revision, {"status": "FEASIBLE", "assignments": [],
+                   "open_positions": [], "summary": {"required": 0, "assigned": 0, "open": 0}}, "TESTADMIN")
+    key = "een-geheim-dat-minstens-32-random-tekens-heeft-ABC123"
+
+    with pytest.raises(ValueError, match="Herstelcode onjuist"):
+        recover_admin_once(db, "TESTADMIN", "incorrect", "NogEenNieuwSterkWachtwoord2026!", key)
+    with pytest.raises(ValueError, match="beheerdersaccount"):
+        recover_admin_once(db, "DEMO001", key, "NogEenNieuwSterkWachtwoord2026!", key)
+
+    recover_admin_once(db, "TESTADMIN", key, "NogEenNieuwSterkWachtwoord2026!", key)
+    assert authenticate(db, "TESTADMIN", "TijdelijkVoorbeeld2026!sterk") is None
+    new = authenticate(db, "TESTADMIN", "NogEenNieuwSterkWachtwoord2026!")
+    assert new and not new["must_change_password"] and new["auth_hash"] != old["auth_hash"]
+    assert lookup_account(db, "DEMO001") is not None
+    assert load_workspace(db) == (original, revision)
+    assert load_plan(db, original["year"], original["month"])["id"] == plan_id
+    with pytest.raises(ValueError, match="al gebruikt"):
+        recover_admin_once(db, "TESTADMIN", key, "DerdeSterkWachtwoord2026!!!", key)
+    assert authenticate(db, "TESTADMIN", "NogEenNieuwSterkWachtwoord2026!")
+
+
+def test_recovery_resets_lockout_without_wiping_other_data(tmp_path):
+    db = setup_db(tmp_path)
+    for _ in range(5):
+        assert authenticate(db, "TESTADMIN", "fout") is None
+    key = "een-geheel-nieuwe-lange-willekeurige-herstelcode"
+    recover_admin_once(db, "TESTADMIN", key, "VolledigNieuwWachtwoord2026!", key)
+    assert authenticate(db, "TESTADMIN", "VolledigNieuwWachtwoord2026!") is not None

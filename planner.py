@@ -17,6 +17,8 @@ from itertools import combinations
 
 from ortools.sat.python import cp_model
 
+from catalog import is_unavailable_during, validate_employee, validate_shift
+
 
 @dataclass
 class PlanResult:
@@ -49,6 +51,10 @@ def validate_dataset(data: dict) -> list[str]:
     if len(ids) != len(set(ids)) or len(eids) != len(set(eids)):
         errors.append("Dienstnummers en personeelsnummers moeten uniek zijn.")
     shiftmap = {s["id"]: s for s in data["shifts"]}
+    for s in data["shifts"]:
+        errors.extend(validate_shift(s))
+    for employee in data["employees"]:
+        errors.extend(validate_employee(employee, set(ids)))
     reqkeys = []
     for s in data["shifts"]:
         try:
@@ -114,12 +120,15 @@ def solve_month(data: dict) -> PlanResult:
         sh = shifts[req["shift_id"]]
         d = date.fromisoformat(req["date"])
         eligible = []
+        interval_start, interval_end = get_slot_bounds(req["date"], sh)
         for ei, emp in enumerate(employees):
             if sh["category"] in emp.get("blocked_categories", []):
                 continue
             if sh["id"] in emp.get("blocked_shifts", []):
                 continue
             if d.weekday() in emp.get("blocked_weekdays", []):
+                continue
+            if is_unavailable_during(emp, interval_start, interval_end):
                 continue
             var = model.new_bool_var(f"x_{ei}_{ri}")
             x[ei, ri] = var
@@ -211,6 +220,8 @@ def solve_month(data: dict) -> PlanResult:
                 assigned_rows.append({"Datum": req["date"], "Dienstnummer": sh["id"],
                                       "Categorie": sh["category"], "Begin": sh["start"], "Einde": sh["end"],
                                       "Controleur": emp["name"], "Personeelsnr": emp["id"],
+                                      "Beginlocatie": sh.get("start_location", sh.get("location", "")),
+                                      "Eindlocatie": sh.get("end_location", sh.get("location", "")),
                                       "Uren": round(minutes_between(sh["start"], sh["end"]) / 60, 2)})
         vacant = solver.value(vacancy[ri])
         if vacant:
