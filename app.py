@@ -3,15 +3,95 @@ from __future__ import annotations
 
 import io
 import json
+import os
+from dataclasses import asdict
 from datetime import date
 
 import pandas as pd
 import streamlit as st
 
 from demo_data import CATEGORIES, WEEKDAYS, build_demo, next_month
-from planner import solve_month, validate_dataset
+from planner import PlanResult, solve_month, validate_dataset
+import store
 
-st.set_page_config(page_title="Controleursplanning | Proefversie", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.2", page_icon="📅", layout="wide")
+
+
+def setting(name: str) -> str:
+    """Staat omgevingsvariabelen en niet-gecommitte Streamlit Secrets toe."""
+    value = os.getenv(name)
+    if value:
+        return value
+    try:
+        return str(st.secrets.get(name, ""))
+    except (FileNotFoundError, OSError, KeyError):
+        return ""
+
+
+DATABASE_URL = setting("DATABASE_URL")
+PERSISTENT = bool(DATABASE_URL)
+engine = None
+current_user = None
+
+if PERSISTENT:
+    @st.cache_resource(show_spinner=False)
+    def connect_db(url: str):
+        return store.get_engine(url)
+
+    try:
+        engine = connect_db(DATABASE_URL)
+        store.initialize(engine, setting("BOOTSTRAP_ADMIN_ID"), setting("BOOTSTRAP_ADMIN_PASSWORD"))
+    except store.SetupError as error:
+        st.error(str(error))
+        st.stop()
+    except Exception:
+        st.error("Databaseverbinding mislukt. Controleer DATABASE_URL en netwerktoegang in de Streamlit Secrets.")
+        st.stop()
+
+    signed_id = st.session_state.get("signed_id")
+    if signed_id:
+        current_user = store.lookup_account(engine, signed_id)
+        if not current_user or not current_user["active"] or current_user["auth_hash"] != st.session_state.get("signed_hash"):
+            st.session_state.clear()
+            current_user = None
+
+    if current_user is None:
+        st.title("🔐 Controleursplanning")
+        st.caption("Aanmelden met personeelsnummer en persoonlijk wachtwoord — TESTOMGEVING")
+        with st.form("login", clear_on_submit=True):
+            login_id = st.text_input("Personeelsnummer", max_chars=64).strip()
+            login_password = st.text_input("Wachtwoord", type="password")
+            submitted = st.form_submit_button("Aanmelden")
+        if submitted:
+            account = store.authenticate(engine, login_id, login_password)
+            if account:
+                st.session_state.clear()
+                st.session_state.signed_id = account["employee_id"]
+                st.session_state.signed_hash = account["auth_hash"]
+                st.rerun()
+            else:
+                st.error("Aanmelden mislukt. Controleer je gegevens of probeer later opnieuw.")
+        st.info("Deze proefversie mag uitsluitend met fictieve gegevens worden gebruikt.")
+        st.stop()
+
+    if current_user["must_change_password"]:
+        st.title("🔑 Wachtwoord wijzigen")
+        st.info("Stel eerst een nieuw persoonlijk wachtwoord in.")
+        with st.form("mandatory_password_change", clear_on_submit=True):
+            old = st.text_input("Tijdelijk wachtwoord", type="password")
+            fresh = st.text_input("Nieuw wachtwoord (minstens 14 tekens)", type="password")
+            confirm = st.text_input("Herhaal nieuw wachtwoord", type="password")
+            if st.form_submit_button("Wijzig wachtwoord"):
+                try:
+                    if fresh != confirm:
+                        raise ValueError("De nieuwe wachtwoorden komen niet overeen.")
+                    store.change_password(engine, current_user["employee_id"], old, fresh)
+                    st.session_state.clear()
+                    st.success("Wachtwoord gewijzigd. Meld je opnieuw aan.")
+                except ValueError as error:
+                    st.error(str(error))
+        st.stop()
+
 
 
 @st.cache_data
@@ -38,6 +118,20 @@ def plan_excel(plan) -> bytes:
 
 
 def replace_data(updated: dict) -> None:
+    errors = validate_dataset(updated)
+    if errors:
+        st.error("Gegevens niet opgeslagen: " + " ".join(errors))
+        st.stop()
+    if PERSISTENT:
+        try:
+            new_revision = store.save_workspace(
+                engine, updated, st.session_state.workspace_revision,
+                current_user["employee_id"], "Projectgegevens aangepast"
+            )
+            st.session_state.workspace_revision = new_revision
+        except (store.ConflictError, ValueError) as error:
+            st.error(str(error))
+            st.stop()
     st.session_state.project_data = updated
     st.session_state.pop("last_plan", None)
 
@@ -60,39 +154,68 @@ def to_iso(value) -> str:
     return date.fromisoformat(str(value)[:10]).isoformat()
 
 
-if "project_data" not in st.session_state:
+if PERSISTENT:
+    try:
+        loaded, revision = store.load_workspace(engine)
+    except Exception:
+        st.error("De gedeelde gegevens konden niet worden opgehaald.")
+        st.stop()
+    previous_revision = st.session_state.get("workspace_revision")
+    st.session_state.project_data = loaded
+    st.session_state.workspace_revision = revision
+    if previous_revision is not None and previous_revision != revision:
+        # Een gelijktijdige wijziging mag geen oude, net ingediende formuliervelden overschrijven.
+        st.session_state.remote_change_notice = True
+        st.rerun()
+elif "project_data" not in st.session_state:
     st.session_state.project_data = build_demo()
 
 data = st.session_state.project_data
+is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("De Lijn — zelfstandig demonstratieproject • GitHub + Streamlit + Google OR-Tools")
-st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Geen gebruikerslogin, geen gedeelde database en geen gevalideerde arbeidsregels. Vul hier geen echte personeelsgegevens in.")
+st.caption("Proefversie 0.2 • GitHub + Streamlit + Google OR-Tools")
+if st.session_state.pop("remote_change_notice", False):
+    st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
+st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
 
 with st.sidebar:
     st.header("Proefproject")
     st.write(f"Planningsmaand: **{data['month']:02d}/{data['year']}**")
-    st.caption("Wijzigingen blijven alleen in deze Streamlit-sessie bestaan. Herstarten kan alles wissen.")
-    st.download_button("⬇️ Bewaar demo als JSON", data=json.dumps(data, ensure_ascii=False, indent=2),
-                       file_name="controleursplanning-demo.json", mime="application/json", use_container_width=True)
-    upload_state = st.file_uploader("Eerder bewaarde demo laden", type=["json"], key="json_upload")
-    if st.button("JSON importeren", disabled=upload_state is None, use_container_width=True):
-        try:
-            incoming = json.load(upload_state)
-            problems = validate_dataset(incoming)
-            if problems:
-                st.error("Import geweigerd: " + " ".join(problems))
-            else:
-                replace_and_rerun(incoming)
-        except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-            st.error(f"Kon gegevens niet laden: {exc}")
-    if st.button("🔄 Fictieve voorbeeldgegevens herstellen", use_container_width=True):
-        replace_and_rerun(build_demo(data["year"], data["month"]))
+    if PERSISTENT:
+        st.success("PostgreSQL — gedeelde testgegevens")
+        st.caption(f"Aangemeld: {current_user['name']} ({current_user['role']})")
+        if st.button("Afmelden", use_container_width=True):
+            st.session_state.clear()
+            st.rerun()
+    else:
+        st.info("Demomodus zonder database: wijzigingen zijn alleen binnen deze sessie beschikbaar.")
+    if is_manager:
+        st.download_button("⬇️ Bewaar demo als JSON", data=json.dumps(data, ensure_ascii=False, indent=2),
+                           file_name="controleursplanning-demo.json", mime="application/json", use_container_width=True)
+        upload_state = st.file_uploader("Eerder bewaarde demo laden", type=["json"], key="json_upload")
+        if st.button("JSON importeren", disabled=upload_state is None, use_container_width=True):
+            try:
+                if upload_state.size > 2 * 1024 * 1024:
+                    raise ValueError("Maximaal 2 MB per JSON-bestand.")
+                incoming = json.load(upload_state)
+                problems = validate_dataset(incoming)
+                if problems:
+                    st.error("Import geweigerd: " + " ".join(problems))
+                else:
+                    replace_and_rerun(incoming)
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+                st.error(f"Kon gegevens niet laden: {exc}")
+        if st.button("🔄 Fictieve voorbeeldgegevens herstellen", use_container_width=True):
+            replace_and_rerun(build_demo(data["year"], data["month"]))
     st.divider()
-    st.caption("Dit project is niet gekoppeld aan systemen van De Lijn.")
+    st.caption("Niet gekoppeld aan systemen van De Lijn.")
 
-screen = st.radio("Onderdeel", ["Overzicht", "Controleurs", "Diensten", "Maandbehoefte", "Voorkeuren", "Planning"],
-                  horizontal=True, label_visibility="collapsed")
+screens = (["Overzicht", "Controleurs", "Diensten", "Maandbehoefte", "Voorkeuren", "Planning"]
+           if is_manager else ["Mijn planning", "Mijn voorkeuren"])
+if PERSISTENT and current_user["role"] == "admin":
+    screens += ["Accounts", "Historiek"]
+screen = st.radio("Onderdeel", screens, horizontal=True, label_visibility="collapsed")
 
 if screen == "Overzicht":
     st.subheader("Projectoverzicht")
@@ -105,7 +228,7 @@ if screen == "Overzicht":
     if "last_plan" in st.session_state:
         plan = st.session_state.last_plan
         st.write(f"Laatste berekening: **{plan.status}** — {plan.summary['assigned']} toegewezen, {plan.summary['open']} openstaande plaatsen.")
-    st.markdown("""**Wat is in deze eerste versie al echt mogelijk?**
+    st.markdown("""**Wat is in deze proefversie al mogelijk?**
 
 - Fictieve controleurs toevoegen en inzetbaarheidsbeperkingen wijzigen.
 - Dienstnummers met vaste uren, categorie en benodigde bezetting beheren.
@@ -114,7 +237,9 @@ if screen == "Overzicht":
 - Met OR-Tools een maandplanning berekenen, rekening houdend met beschikbare basisregels.
 - Een gedeeltelijke planning met openstaande dienstplaatsen tonen en naar Excel exporteren.
 
-**Nog niet gebouwd:** echte accounts, gedeelde database, publicatie, ruilaanvragen, taakbeheer, goedkeuringsstromen, wettelijke validatie, gescheiden teams, periode-overstijgende controles en back-upbeheer. Deze onderdelen volgen in latere versies.""")
+**In v0.2:** aanmelden met personeelsnummer, afzonderlijke rollen, gedeelde PostgreSQL-gegevens, auditlog en conceptplanning/publicatie in testmodus. Zonder ingestelde DATABASE_URL blijft de oude demomodus beschikbaar.
+
+**Nog niet gebouwd:** ruilaanvragen, taakbeheer, goedkeuringsstromen, wettelijke validatie, teams, controles over maandgrenzen en automatische back-ups. Deze onderdelen volgen in latere versies.""")
 
 elif screen == "Controleurs":
     st.subheader("Controleurs beheren")
@@ -225,9 +350,10 @@ elif screen == "Maandbehoefte":
             year = st.number_input("Jaar", 2025, 2040, int(data["year"]))
         with colm:
             month = st.selectbox("Maand", range(1, 13), index=int(data["month"])-1)
-        if st.form_submit_button("Andere maand starten (wist huidige maandbehoefte)"):
+        if st.form_submit_button("Andere testmaand starten (wist huidige demo-invoer)"):
             if (year, month) != (data["year"], data["month"]):
                 replace_and_rerun(build_demo(int(year), int(month)))
+    st.caption("Let op: in v0.2 is maar één testmaand tegelijk bewerkbaar. Exporteer eerst je JSON vóór je de maand wijzigt.")
     st.dataframe(pd.DataFrame(data["demand"]), hide_index=True, use_container_width=True, height=300)
     with st.form("demand_form"):
         a,b,c = st.columns(3)
@@ -341,11 +467,34 @@ elif screen == "Planning":
         try:
             with st.spinner("OR-Tools zoekt een zo goed mogelijke planning…"):
                 st.session_state.last_plan = solve_month(data)
-        except Exception as exc:
+                if PERSISTENT and st.session_state.last_plan.status in ("OPTIMAL", "FEASIBLE"):
+                    st.session_state.last_plan_id = store.save_plan(
+                        engine, data, st.session_state.workspace_revision,
+                        asdict(st.session_state.last_plan), current_user["employee_id"]
+                    )
+        except (ValueError, store.ConflictError) as exc:
             st.error(f"De berekening kon niet worden uitgevoerd: {exc}")
+        except Exception:
+            st.error("De berekening of opslag is mislukt. Controleer de applicatielogs in je testomgeving.")
+    plan_record = store.load_plan(engine, data["year"], data["month"]) if PERSISTENT else None
+    if plan_record:
+        plan = PlanResult(**plan_record["payload"])
+        st.session_state.last_plan = plan
     if "last_plan" in st.session_state:
         plan = st.session_state.last_plan
+        if plan_record and plan_record["revision"] != st.session_state.workspace_revision:
+            st.warning("Deze conceptplanning is berekend met een oudere versie van de invoergegevens.")
         st.markdown(f"#### Resultaat: {plan.status}")
+        if plan_record:
+            st.caption(f"Versie #{plan_record['id']} • {'Gepubliceerd' if plan_record['published'] else 'Concept'} • Opgesteld door {plan_record['author']}")
+            if not plan_record["published"] and plan_record["revision"] == st.session_state.workspace_revision:
+                if st.button("✅ Publiceer deze testplanning"):
+                    try:
+                        store.publish_plan(engine, plan_record["id"], st.session_state.workspace_revision, current_user["employee_id"])
+                        st.success("Testplanning gepubliceerd.")
+                        st.rerun()
+                    except (ValueError, store.ConflictError) as error:
+                        st.error(str(error))
         a,b,c = st.columns(3)
         a.metric("Benodigde plaatsen", plan.summary["required"])
         b.metric("Toegewezen plaatsen", plan.summary["assigned"])
@@ -366,3 +515,90 @@ elif screen == "Planning":
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         elif plan.summary["open"] is None:
             st.error("Er is binnen de rekentijd geen bruikbare oplossing gevonden. Probeer de rekentijd te verlengen.")
+
+
+elif screen == "Mijn voorkeuren":
+    st.subheader("Mijn voorkeuren — gewenste vrije dagen")
+    st.caption("Dit zijn zachte wensen, geen goedgekeurde verlofdagen. Het systeem kan ervan afwijken.")
+    eid = current_user["employee_id"]
+    employee = next((e for e in data["employees"] if e["id"] == eid), None)
+    if employee is None:
+        st.error("Je account is nog niet gekoppeld aan een fictieve controleur. Vraag je testbeheerder om dit te controleren.")
+    else:
+        my_prefs = sorted([p for p in data["preferences"] if p["employee_id"] == eid], key=lambda p: p["date"])
+        st.dataframe(pd.DataFrame(my_prefs, columns=["date", "priority"]), hide_index=True, use_container_width=True)
+        with st.form("my_preference"):
+            wished = st.date_input("Gewenste vrije dag", value=date(data["year"], data["month"], 1))
+            priority = st.select_slider("Prioriteit", options=[1, 2, 3], value=2,
+                                        format_func=lambda x: {1: "Laag", 2: "Normaal", 3: "Hoog"}[x])
+            if st.form_submit_button("Voorkeur opslaan"):
+                if (wished.year, wished.month) != (data["year"], data["month"]):
+                    st.error("Kies een dag in de huidige planningsmaand.")
+                else:
+                    updated = clone()
+                    updated["preferences"] = [p for p in updated["preferences"]
+                                              if (p["employee_id"], p["date"]) != (eid, wished.isoformat())]
+                    updated["preferences"].append({"employee_id": eid, "date": wished.isoformat(), "priority": int(priority)})
+                    replace_and_rerun(updated)
+        if my_prefs:
+            target_date = st.selectbox("Vrijwens intrekken", [p["date"] for p in my_prefs])
+            if st.button("Verwijder mijn voorkeur"):
+                updated = clone()
+                updated["preferences"] = [p for p in updated["preferences"]
+                                          if (p["employee_id"], p["date"]) != (eid, target_date)]
+                replace_and_rerun(updated)
+
+elif screen == "Mijn planning":
+    st.subheader("Mijn gepubliceerde maandplanning")
+    published = store.load_plan(engine, data["year"], data["month"], published_only=True)
+    if not published:
+        st.info("Er is nog geen testplanning voor deze maand gepubliceerd.")
+    else:
+        eid = current_user["employee_id"]
+        own = [a for a in published["payload"]["assignments"] if a["Personeelsnr"] == eid]
+        st.caption(f"Gepubliceerde testversie #{published['id']} • {data['month']:02d}/{data['year']}")
+        st.dataframe(pd.DataFrame(own, columns=["Datum", "Dienstnummer", "Categorie", "Begin", "Einde", "Uren"]),
+                     hide_index=True, use_container_width=True)
+        if not own:
+            st.info("Voor deze maand zijn nog geen diensten aan jouw testaccount toegewezen.")
+
+elif screen == "Accounts":
+    st.subheader("Accounts beheren — alleen hoofdbeheerder")
+    accounts = store.list_accounts(engine)
+    st.dataframe(pd.DataFrame(accounts), hide_index=True, use_container_width=True)
+    with st.form("new_account", clear_on_submit=True):
+        st.markdown("#### Nieuw testaccount")
+        eid = st.text_input("Personeelsnummer", max_chars=64)
+        name = st.text_input("Weergavenaam", max_chars=160)
+        role = st.selectbox("Rol", ["controleur", "planner", "admin"])
+        password = st.text_input("Tijdelijk wachtwoord (minstens 14 tekens)", type="password")
+        if st.form_submit_button("Account aanmaken"):
+            try:
+                if role == "controleur" and eid.strip() not in {e["id"] for e in data["employees"]}:
+                    raise ValueError("Voeg deze testcontroleur eerst toe bij 'Controleurs'.")
+                store.add_account(engine, eid, name, role, password, current_user["employee_id"])
+                st.success("Testaccount aangemaakt. Geef het tijdelijke wachtwoord uitsluitend via een veilig kanaal door.")
+                st.rerun()
+            except ValueError as error:
+                st.error(str(error))
+    st.divider()
+    with st.form("manage_account"):
+        eid = st.selectbox("Bestaand account", [a["employee_id"] for a in accounts])
+        selected = next(a for a in accounts if a["employee_id"] == eid)
+        enabled = st.checkbox("Account actief", value=selected["active"])
+        new_password = st.text_input("Nieuw tijdelijk wachtwoord (optioneel)", type="password")
+        if st.form_submit_button("Accountinstellingen opslaan"):
+            try:
+                if enabled != selected["active"]:
+                    store.set_account_state(engine, eid, enabled, current_user["employee_id"])
+                if new_password:
+                    store.reset_password(engine, eid, new_password, current_user["employee_id"])
+                st.success("Accountinstellingen opgeslagen.")
+                st.rerun()
+            except ValueError as error:
+                st.error(str(error))
+
+elif screen == "Historiek":
+    st.subheader("Wijzigingshistoriek")
+    st.caption("Beknopt auditlog. Dit is nog geen volledig forensisch bedrijfslog.")
+    st.dataframe(pd.DataFrame(store.recent_audit(engine)), use_container_width=True, hide_index=True)
