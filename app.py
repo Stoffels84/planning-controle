@@ -15,7 +15,7 @@ from planner import PlanResult, solve_month, validate_dataset
 import store
 import catalog
 
-st.set_page_config(page_title="Controleursplanning | v0.3", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.4", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -198,7 +198,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.3 • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.4 • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -235,7 +235,7 @@ with st.sidebar:
     st.divider()
     st.caption("Niet gekoppeld aan systemen van De Lijn.")
 
-screens = (["Overzicht", "Controleurs", "Diensten", "Maandbehoefte", "Voorkeuren", "Planning"]
+screens = (["Overzicht", "Controleurs", "Diensten", "Maandbehoefte", "Voorkeuren", "Planningsregels", "Planning"]
            if is_manager else ["Mijn planning", "Mijn voorkeuren"])
 if PERSISTENT and current_user["role"] == "admin":
     screens += ["Accounts", "Historiek"]
@@ -261,7 +261,7 @@ if screen == "Overzicht":
 - Met OR-Tools een maandplanning berekenen, rekening houdend met beschikbare basisregels.
 - Een gedeeltelijke planning met openstaande dienstplaatsen tonen en naar Excel exporteren.
 
-**In v0.3:** uitgebreid controleurs- en dienstenbeheer met team, tijdelijke blokkeringen en begin-/eindlocatie. Sinds v0.2: aanmelden met personeelsnummer, afzonderlijke rollen, gedeelde PostgreSQL-gegevens, auditlog en conceptplanning/publicatie in testmodus. Zonder ingestelde DATABASE_URL blijft de oude demomodus beschikbaar.
+**In v0.4:** algemene en individuele dienstreeksen, dienstovergangen, aanvullende rustregels en zachte maandstreefuren. **In v0.3:** uitgebreid controleurs- en dienstenbeheer met team, tijdelijke blokkeringen en begin-/eindlocatie. Sinds v0.2: aanmelden met personeelsnummer, afzonderlijke rollen, gedeelde PostgreSQL-gegevens, auditlog en conceptplanning/publicatie in testmodus. Zonder ingestelde DATABASE_URL blijft de oude demomodus beschikbaar.
 
 **Nog niet gebouwd:** ruilaanvragen, taakbeheer, goedkeuringsstromen, wettelijke validatie, teams, controles over maandgrenzen en automatische back-ups. Deze onderdelen volgen in latere versies.""")
 
@@ -272,6 +272,7 @@ elif screen == "Controleurs":
     st.dataframe(pd.DataFrame([{
         "Personeelsnr": e["id"], "Naam": e["name"], "Team": e["team"],
         "Regime %": e["contract_percent"], "Max. maanduren": e["max_month_hours"],
+        "Streefuren": e["target_month_hours"], "Pers. rust (uur)": e["min_rest_hours"],
         "Verboden categorieën": ", ".join(e["blocked_categories"]),
         "Geblokkeerde periodes": len(e["blocked_periods"]), "Actief": e["active"]
     } for e in records]), use_container_width=True, hide_index=True)
@@ -313,6 +314,8 @@ elif screen == "Controleurs":
                 with col1:
                     contract = st.number_input("Arbeidsregime (%)", 1, 100, int(emp["contract_percent"]))
                     max_hours = st.number_input("Maximum in te plannen maanduren", 1, 250, int(emp["max_month_hours"]))
+                    target_hours = st.number_input("Streefuren in deze maand (0 = geen)", 0, int(emp["max_month_hours"]),
+                                                  min(int(emp["target_month_hours"]), int(emp["max_month_hours"])))
                     preferred = st.selectbox("Zachte voorkeurscategorie", ["Geen", *CATEGORIES],
                                              index=["Geen", *CATEGORIES].index(emp["preferred_category"]))
                 with col2:
@@ -324,6 +327,21 @@ elif screen == "Controleurs":
                                                       default=emp["blocked_weekdays"], format_func=lambda n: WEEKDAYS[n])
                 individual_limit = st.number_input("Max. opeenvolgende werkdagen (0 = algemene regel)", 0, 7,
                                                    int(emp["max_consecutive"] or 0))
+                custom_rest = st.number_input("Individuele minimale rust (uren, 0 = algemene regel)", 0, 48,
+                                              int(emp["min_rest_hours"] or 0))
+                st.markdown("**Maximaal opeenvolgende diensten per categorie**")
+                max_runs = {}
+                cols_runs = st.columns(4)
+                for idx, category in enumerate(CATEGORIES):
+                    with cols_runs[idx]:
+                        run = st.number_input(category + " (0 = algemeen)", 0, 7,
+                                              int(emp["max_category_run"].get(category, 0)),
+                                              key="emp_run_" + selected_id + "_" + category)
+                        if run:
+                            max_runs[category] = int(run)
+                all_pairs = [catalog.transition_code(a, b) for a in CATEGORIES for b in CATEGORIES]
+                blocked_pairs = st.multiselect("Verboden overgangen voor deze controleur (aaneensluitende dagen)",
+                                               all_pairs, default=emp["blocked_transitions"])
                 active = st.checkbox("Controleur actief", value=bool(emp["active"]))
                 st.caption("Deze beperkingen zijn verplicht voor de solver. De voorkeur voor een dienstcategorie is een zachte wens.")
                 if st.form_submit_button("Profiel bewaren"):
@@ -333,7 +351,12 @@ elif screen == "Controleurs":
                                    "contract_percent": int(contract), "max_month_hours": int(max_hours),
                                    "preferred_category": preferred, "blocked_categories": blocked_cats,
                                    "blocked_shifts": blocked_shifts, "blocked_weekdays": blocked_weekdays,
-                                   "max_consecutive": int(individual_limit) or None, "active": active})
+                                   "max_consecutive": int(individual_limit) or None,
+                                   "min_rest_hours": int(custom_rest) or None,
+                                   "target_month_hours": int(target_hours),
+                                   "max_category_run": max_runs,
+                                   "blocked_transitions": blocked_pairs,
+                                   "active": active})
                     replace_and_rerun(state)
     with tab_periods:
         if data["employees"]:
@@ -521,6 +544,46 @@ elif screen == "Voorkeuren":
                 state["preferences"].pop(idx)
                 replace_and_rerun(state)
     st.info("Zes voorkeurtypes zijn in het functioneel ontwerp vastgelegd. Deze eerste versie ondersteunt gewenste vrije dagen en een voorkeurscategorie; de andere volgen later.")
+
+elif screen == "Planningsregels":
+    st.subheader("Planningsregels: dienstreeksen en rusttijden")
+    st.warning("Alle regels zijn PROEFINSTELLINGEN. De toepassing controleert nog niet of ze voldoen aan de arbeidsafspraken van De Lijn.")
+    cfg = catalog.settings_with_defaults(data["settings"])
+    with st.form("category_rules"):
+        st.markdown("#### Algemene maximumreeksen")
+        st.caption("0 = geen maximum voor die categorie. Het maximum opeenvolgende werkdagen blijft afzonderlijk gelden.")
+        cols = st.columns(4)
+        run_values = {}
+        for idx, cat in enumerate(CATEGORIES):
+            with cols[idx]:
+                run_values[cat] = st.number_input("Max. " + cat, 0, 7,
+                                                  int(cfg["max_category_run"].get(cat, 0)),
+                                                  key="general_run_" + cat)
+        st.markdown("#### Extra rust per dienstovergang")
+        st.caption("De hoogste waarde van algemene rust, individuele rust en overgangsrust geldt. 0 = geen extra rust.")
+        rest_values = {}
+        for before in CATEGORIES:
+            cols = st.columns(4)
+            for idx, after in enumerate(CATEGORIES):
+                code = catalog.transition_code(before, after)
+                with cols[idx]:
+                    rest_values[code] = st.number_input(code + " (uur)", 0, 48,
+                                                        int(cfg["transition_rest_hours"].get(code, 0)),
+                                                        key="rest_" + code)
+        st.markdown("#### Verboden dienstovergangen")
+        st.caption("Geldt alleen voor diensten op twee opeenvolgende kalenderdagen, boven op de rustregels.")
+        transitions = [catalog.transition_code(a, b) for a in CATEGORIES for b in CATEGORIES]
+        blocked = st.multiselect("Verboden combinaties", transitions, default=cfg["blocked_transitions"])
+        weight = st.slider("Belang zachte maandstreefuren", 0, 100, int(cfg["hours_weight"]))
+        if st.form_submit_button("Planningsregels opslaan"):
+            state = clone()
+            state["settings"].update({
+                "max_category_run": {k: int(v) for k, v in run_values.items() if v},
+                "transition_rest_hours": {k: int(v) for k, v in rest_values.items() if v},
+                "blocked_transitions": list(blocked), "hours_weight": int(weight)
+            })
+            replace_and_rerun(state)
+    st.info("Individuele uitzonderingen stel je in bij **Controleurs → Profiel en beperkingen**. Per categorie geldt de strengste maximumreeks.")
 
 elif screen == "Planning":
     st.subheader("Automatisch plannen met Google OR-Tools")

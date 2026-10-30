@@ -1,11 +1,11 @@
 """CP-SAT-proefmodel voor maandelijkse controleursplanning.
 
 Dit is GEEN gevalideerde implementatie van de arbeidsregels van De Lijn.
-Dekt momenteel: bezetting per dag/dienst, 1 dienst per kalenderdag,
-individuele inzetbaarheid, minimale rust, max. opeenvolgende werkdagen,
-maandelijkse urenlimiet, zachte vrijwensen en eenvoudige eerlijke verdeling.
-Niet gedekt: vorige/volgende maand, taken, verplaatsingen, verlof,
-weekendpatronen, dienstspecifieke rustregels en wettelijke toetsing.
+Dekt o.a. bezetting, maandelijkse urenlimieten, individuele inzetbaarheid,
+rust per dienstovergang, verboden overgangen, maximum categoriedienstreeksen,
+zachte urenstreefdoelen en zachte wensen.
+Niet gedekt: vorige/volgende maand, verlofsaldi, taken, verplaatsingen,
+weekendpatronen, aparte wettelijke toetsing.
 """
 
 from __future__ import annotations
@@ -17,7 +17,8 @@ from itertools import combinations
 
 from ortools.sat.python import cp_model
 
-from catalog import is_unavailable_during, validate_employee, validate_shift
+from catalog import (is_unavailable_during, profile, settings_with_defaults, transition_code,
+                     validate_employee, validate_shift, validate_schedule_settings)
 
 
 @dataclass
@@ -50,6 +51,7 @@ def validate_dataset(data: dict) -> list[str]:
     eids = [e["id"] for e in data["employees"]]
     if len(ids) != len(set(ids)) or len(eids) != len(set(eids)):
         errors.append("Dienstnummers en personeelsnummers moeten uniek zijn.")
+    errors.extend(validate_schedule_settings(data["settings"]))
     shiftmap = {s["id"]: s for s in data["shifts"]}
     for s in data["shifts"]:
         errors.extend(validate_shift(s))
@@ -93,7 +95,7 @@ def solve_month(data: dict) -> PlanResult:
     if errors:
         raise ValueError("\n".join(errors))
 
-    employees = [e for e in data["employees"] if e.get("active", True)]
+    employees = [profile(e) for e in data["employees"] if e.get("active", True)]
     shifts = {s["id"]: s for s in data["shifts"]}
     slots = sorted([r for r in data["demand"] if r["required"] > 0], key=lambda r:(r["date"],r["shift_id"]))
     if not employees:
@@ -113,7 +115,7 @@ def solve_month(data: dict) -> PlanResult:
     weekend_vars = defaultdict(list)
     pref_penalty_terms = []
     all_assigned = []
-    settings = data["settings"]
+    settings = settings_with_defaults(data["settings"])
 
     off_pref = {(p["employee_id"], p["date"]): int(p["priority"]) for p in data["preferences"]}
     for ri, req in enumerate(slots):
@@ -152,20 +154,54 @@ def solve_month(data: dict) -> PlanResult:
     for vars_today in staff_day.values():
         model.add(sum(vars_today) <= 1)
 
-    # Rusttijd/overlap op echte tijdstippen (ook voor diensten over middernacht).
+    # Rust en opeenvolging op werkelijke tijdstippen, ook als een dienst
+    # over middernacht loopt. Overgangsverboden gelden voor aansluitende
+    # KALENDERdagen; een vrije kalenderdag onderbreekt de dienstreeks.
     bounds = [get_slot_bounds(r["date"], shifts[r["shift_id"]]) for r in slots]
-    rest = timedelta(hours=float(settings["min_rest_hours"]))
     for ei, items in employee_vars.items():
+        emp = employees[ei]
         for (i, va), (j, vb) in combinations(items, 2):
             a_start, a_end = bounds[i]
             b_start, b_end = bounds[j]
-            if (a_start <= b_start and b_start < a_end + rest) or (b_start < a_start and a_start < b_end + rest):
+            if (b_start, j) < (a_start, i):
+                a_start, a_end, b_start, b_end = b_start, b_end, a_start, a_end
+                prev_i, next_i = j, i
+            else:
+                prev_i, next_i = i, j
+            c_prev = shifts[slots[prev_i]["shift_id"]]["category"]
+            c_next = shifts[slots[next_i]["shift_id"]]["category"]
+            pair = transition_code(c_prev, c_next)
+            effective_rest = max(float(settings["min_rest_hours"]),
+                                 float(emp["min_rest_hours"] or 0),
+                                 float(settings["transition_rest_hours"].get(pair, 0)))
+            forbidden = b_start < a_end + timedelta(hours=effective_rest)
+            adjacent = (date.fromisoformat(slots[next_i]["date"]) -
+                        date.fromisoformat(slots[prev_i]["date"])).days == 1
+            if adjacent and (pair in settings["blocked_transitions"] or pair in emp["blocked_transitions"]):
+                forbidden = True
+            if forbidden:
                 model.add(va + vb <= 1)
 
     first = date(int(data["year"]), int(data["month"]), 1)
     next_month = (first + timedelta(days=32)).replace(day=1)
     days = [(first + timedelta(days=i)).isoformat() for i in range((next_month - first).days)]
     for ei, emp in enumerate(employees):
+        # Max. aaneengesloten kalenderdagen met dezelfde categorie.
+        # Alleen als elke dag van het venster die categorie krijgt, is
+        # sprake van een overschreden reeks.
+        for cat in ("Vroeg", "Dag", "Laat", "Nacht"):
+            limits = [n for n in (settings["max_category_run"].get(cat),
+                                   emp["max_category_run"].get(cat)) if n is not None]
+            if not limits:
+                continue
+            max_run = min(limits)
+            by_day = defaultdict(list)
+            for ri, var in employee_vars[ei]:
+                if shifts[slots[ri]["shift_id"]]["category"] == cat:
+                    by_day[slots[ri]["date"]].append(var)
+            for start_idx in range(max(0, len(days)-max_run)):
+                window = days[start_idx:start_idx+max_run+1]
+                model.add(sum(v for day in window for v in by_day.get(day, [])) <= max_run)
         limit = emp.get("max_consecutive") or int(settings["max_consecutive"])
         limit = int(limit)
         if limit <= 0:
@@ -185,6 +221,19 @@ def solve_month(data: dict) -> PlanResult:
         dev = model.new_int_var(0, len(slots) * staff_count * 20, f"diff_{ei}")
         model.add_abs_equality(dev, staff_count * count - total)
         fairness.append(dev)
+    # Afwijking t.o.v. individueel zacht urendoel (minuten), nooit een
+    # verplicht minimum. Hierdoor blijft gedeeltelijke planning mogelijk.
+    hours_deviations = []
+    for ei, emp in enumerate(employees):
+        target = int(round(float(emp.get("target_month_hours", 0)) * 60))
+        if target <= 0:
+            continue
+        worked = sum(minutes_between(shifts[slots[ri]["shift_id"]]["start"],
+                                     shifts[slots[ri]["shift_id"]]["end"]) * var
+                     for ri, var in employee_vars[ei])
+        deviation = model.new_int_var(0, 15000, f"hours_deviation_{ei}")
+        model.add_abs_equality(deviation, worked - target)
+        hours_deviations.append(deviation)
     total_weekends = sum(v for vals in weekend_vars.values() for v in vals)
     for ei in range(len(employees)):
         dev = model.new_int_var(0, len(slots) * staff_count * 20, f"weekend_{ei}")
@@ -196,10 +245,14 @@ def solve_month(data: dict) -> PlanResult:
     needed = sum(r["required"] for r in slots)
     pref_weight = int(settings["preference_weight"])
     fair_weight = int(settings["fairness_weight"])
-    covering_cost = 1 + pref_weight * (31 * needed) + fair_weight * (2 * staff_count * staff_count * needed)
+    hours_weight = int(settings["hours_weight"])
+    covering_cost = (1 + pref_weight * (31 * needed)
+                     + fair_weight * (2 * staff_count * staff_count * needed)
+                     + hours_weight * (15000 * staff_count))
     model.minimize(covering_cost * sum(vacancy.values())
                    + pref_weight * sum(pref_penalty_terms)
-                   + fair_weight * sum(fairness))
+                   + fair_weight * sum(fairness)
+                   + hours_weight * sum(hours_deviations))
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(settings["time_limit_seconds"])

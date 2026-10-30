@@ -1,4 +1,4 @@
-"""Veilige, achterwaarts compatibele profiel- en dienstdefinities voor v0.3.
+"""Veilige, achterwaarts compatibele profiel- en dienstdefinities voor v0.4.
 
 Alle velden leven in de bestaande Workspace.payload (JSON); geen destructieve
 PostgreSQL-migratie nodig. De solver gebruikt de relevante harde beperkingen.
@@ -22,6 +22,10 @@ def profile(employee: dict) -> dict:
     result.setdefault("blocked_shifts", [])
     result.setdefault("preferred_category", "Geen")
     result.setdefault("max_consecutive", None)
+    result.setdefault("min_rest_hours", None)  # None = algemene instelling
+    result.setdefault("target_month_hours", 0)  # 0 = geen zacht urendoel
+    result.setdefault("max_category_run", {})
+    result.setdefault("blocked_transitions", [])
     result.setdefault("active", True)
     return result
 
@@ -39,7 +43,9 @@ def new_employee(identifier: str, name: str, team: str, contract_percent: int, m
     return {
         "id": identifier.strip(), "name": name.strip(), "team": team.strip(),
         "contract_percent": int(contract_percent), "max_month_hours": int(max_month_hours),
-        "max_consecutive": None, "blocked_categories": [], "blocked_shifts": [],
+        "max_consecutive": None, "min_rest_hours": None, "target_month_hours": 0,
+        "max_category_run": {}, "blocked_transitions": [],
+        "blocked_categories": [], "blocked_shifts": [],
         "blocked_weekdays": [], "blocked_periods": [], "preferred_category": "Geen",
         "active": True,
     }
@@ -67,6 +73,54 @@ def validate_periods(periods: list[dict]) -> list[str]:
     return errors
 
 
+def transition_code(previous: str, following: str) -> str:
+    return f"{previous}>{following}"
+
+
+def known_transitions() -> set[str]:
+    return {transition_code(a, b) for a in CATEGORIES for b in CATEGORIES}
+
+
+def settings_with_defaults(settings: dict) -> dict:
+    result = dict(settings)
+    result.setdefault("transition_rest_hours", {})  # min. uren per overgang
+    result.setdefault("blocked_transitions", [])
+    result.setdefault("max_category_run", {})  # maximum per categorie; leeg = onbeperkt
+    result.setdefault("hours_weight", 0)  # standaard uit; te plannen uren = zacht doel
+    return result
+
+
+def validate_schedule_settings(settings: dict) -> list[str]:
+    s = settings_with_defaults(settings)
+    errors = []
+    for k, lo, hi in (("min_rest_hours", 0, 48), ("max_consecutive", 1, 7),
+                      ("time_limit_seconds", 1, 3600), ("preference_weight", 0, 100),
+                      ("fairness_weight", 0, 100), ("hours_weight", 0, 100)):
+        v = s.get(k)
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not lo <= v <= hi:
+            errors.append(f"Planningsinstelling {k} moet tussen {lo} en {hi} liggen.")
+    if not isinstance(s["transition_rest_hours"], dict):
+        errors.append("Overgangsrust moet een lijst met combinaties zijn.")
+    else:
+        for key, v in s["transition_rest_hours"].items():
+            if key not in known_transitions() or not isinstance(v, (int, float)) or isinstance(v, bool) or not 0 <= v <= 48:
+                errors.append(f"Ongeldige overgangsrust: {key}.")
+    if not isinstance(s["blocked_transitions"], list) or not set(s["blocked_transitions"]).issubset(known_transitions()):
+        errors.append("Ongeldige verboden dienstovergangen.")
+    errors.extend(validate_category_run(s["max_category_run"], "Algemeen"))
+    return errors
+
+
+def validate_category_run(rules: dict, owner: str) -> list[str]:
+    if not isinstance(rules, dict):
+        return [f"{owner}: maxima voor dienstreeksen moeten een tabel zijn."]
+    errors = []
+    for k, v in rules.items():
+        if k not in CATEGORIES or not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= 7:
+            errors.append(f"{owner}: ongeldig maximum voor categorie {k}.")
+    return errors
+
+
 def validate_employee(employee: dict, known_shifts: set[str]) -> list[str]:
     e = profile(employee)
     errors = []
@@ -85,6 +139,15 @@ def validate_employee(employee: dict, known_shifts: set[str]) -> list[str]:
     consecutive = e.get("max_consecutive")
     if consecutive is not None and (not isinstance(consecutive, int) or not 1 <= consecutive <= 7):
         errors.append(f"Controleur {key}: ongeldig individueel maximum opeenvolgende werkdagen.")
+    personal_rest = e["min_rest_hours"]
+    if personal_rest is not None and (not isinstance(personal_rest, (int, float)) or isinstance(personal_rest, bool) or not 0 <= personal_rest <= 48):
+        errors.append(f"Controleur {key}: individuele minimale rust moet tussen 0 en 48 uur liggen.")
+    target = e["target_month_hours"]
+    if not isinstance(target, (int, float)) or isinstance(target, bool) or not 0 <= target <= hours:
+        errors.append(f"Controleur {key}: streefuren moeten tussen 0 en maximum maanduren liggen.")
+    errors.extend(validate_category_run(e["max_category_run"], f"Controleur {key}"))
+    if not isinstance(e["blocked_transitions"], list) or not set(e["blocked_transitions"]).issubset(known_transitions()):
+        errors.append(f"Controleur {key}: ongeldige verboden dienstovergangen.")
     if not set(e["blocked_categories"]).issubset(CATEGORIES):
         errors.append(f"Controleur {key}: onbekende verboden dienstcategorie.")
     if not set(e["blocked_shifts"]).issubset(known_shifts):
