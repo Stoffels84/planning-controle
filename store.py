@@ -251,6 +251,48 @@ def list_month_workspaces(engine) -> list[dict]:
         return summaries
 
 
+
+def dashboard_month_snapshots(engine, actor: str) -> list[dict]:
+    """Read-only manager report; no raw personnel profiles returned.
+
+    Latest saved plan and latest published plan may differ. The frontend can
+    therefore warn about newer inputs without silently replacing publications.
+    """
+    initialize_months(engine)
+    with session_factory(engine)() as s:
+        account = s.get(Account, actor)
+        if not account or not account.active or account.role not in ("admin", "planner"):
+            raise ValueError("Alleen beheerders en planners mogen het dashboard bekijken.")
+        months = s.scalars(select(MonthWorkspace).order_by(MonthWorkspace.period)).all()
+        versions = s.scalars(select(PlanningVersion).order_by(PlanningVersion.id.desc())).all()
+        by_period = {}
+        for p in versions:
+            key = p.year * 100 + p.month
+            entry = by_period.setdefault(key, {"latest_plan": None, "published_plan": None})
+            if entry["latest_plan"] is None:
+                entry["latest_plan"] = p
+            pub = entry["published_plan"]
+            if p.published_at is not None and (pub is None or
+                    (p.published_at, p.id) > (pub.published_at, pub.id)):
+                entry["published_plan"] = p
+        output = []
+        for m in months:
+            year, month = divmod(m.period, 100)
+            versions_for_month = by_period.get(m.period, {})
+            def small_plan(p):
+                return None if p is None else {
+                    "id": p.id, "revision": p.workspace_revision,
+                    "payload": {"summary": p.payload.get("summary", {})},
+                }
+            output.append({
+                "year": year, "month": month, "revision": m.revision,
+                "workspace": {k: m.payload.get(k, []) for k in ("demand", "task_needs", "preferences")},
+                "latest_plan": small_plan(versions_for_month.get("latest_plan")),
+                "published_plan": small_plan(versions_for_month.get("published_plan")),
+            })
+        return output
+
+
 def create_month_workspace(engine, year: int, month: int, actor: str,
                            source_period: tuple[int, int] | None = None,
                            copy_mode: str = "weekday") -> None:

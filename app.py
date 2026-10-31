@@ -27,8 +27,9 @@ from daily_v091 import days_in_month, shifts_by_day, current_daily_choices, upda
 from requests_v010 import STATUS_LABELS
 from swap_v011 import regular_assignments
 from month_copy_v013 import copy_month_demand_rows
+from dashboard_v014 import summarize_month, summarize_requests, dashboard_warnings, dashboard_counts
 
-st.set_page_config(page_title="Controleursplanning | v0.13", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.14", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -440,7 +441,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.13 • Maandbehoefte kopiëren • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.14 • Maanddashboard • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -487,7 +488,7 @@ if PERSISTENT and current_user["role"] == "admin":
 screen = st.radio("Onderdeel", screens, horizontal=True, label_visibility="collapsed")
 
 if screen == "Overzicht":
-    st.subheader("Projectoverzicht")
+    st.subheader("Beheerdersdashboard")
     a, b, c, d = st.columns(4)
     a.metric("Controleurs", sum(bool(e.get("active", True)) for e in data["employees"]))
     b.metric("Dienstnummers", len(data["shifts"]))
@@ -495,11 +496,79 @@ if screen == "Overzicht":
     d.metric("Vrijwensen", len(data["preferences"]))
     st.caption(f"Takencatalogus: {len(data.get('tasks', []))} taken, {len(data.get('task_needs', []))} ingeplande taakblokken.")
     if PERSISTENT:
-        st.subheader("Overzicht aangemaakte kalendermaanden")
-        st.dataframe(pd.DataFrame([{"Maand": f"{r['month']:02d}/{r['year']}",
-                                   "Invoer": "Aanwezig" if r["has_demand"] else "Nog leeg",
-                                   "Gepubliceerd": "Ja" if r["published"] else "Nee"}
-                                  for r in month_overview]), hide_index=True, use_container_width=True)
+        st.markdown("### Planningstatus en opvolging")
+        try:
+            snapshots = store.dashboard_month_snapshots(engine, current_user["employee_id"])
+            overview_rows = [summarize_month(s) for s in snapshots]
+            leave_requests = store.list_leave_requests(engine, current_user["employee_id"])
+            swap_requests = store.list_swap_requests(engine, current_user["employee_id"])
+        except (ValueError, store.ConflictError):
+            st.error("Dashboard niet beschikbaar: onvoldoende rechten of tegenstrijdige gegevens.")
+            st.stop()
+        except Exception:
+            st.error("Het beheerdersdashboard kon niet worden geladen. Controleer de database-logboeken.")
+            st.stop()
+        if overview_rows:
+            counts = dashboard_counts(overview_rows)
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Aangemaakte maanden", counts["months"])
+            k2.metric("Maanden gepubliceerd", counts["published"])
+            k3.metric("Verouderde planversies", counts["outdated"])
+            k4.metric("Lege maanden", counts["without_demand"])
+
+            years = sorted({r["year"] for r in overview_rows})
+            year_filter = st.selectbox("Kalenderjaar", ["Alle jaren"] + years,
+                                       key="dashboard_year_v014")
+            selected_rows = [r for r in overview_rows if year_filter == "Alle jaren" or r["year"] == year_filter]
+            formatted_rows = [{
+                "Maand": r["period"], "Status": r["status"],
+                "Dienstregels": r["demand_lines"], "Dienstplaatsen nodig": r["required_now"],
+                "Taakplaatsen": r["task_places"], "Voorkeuren": r["preferences"],
+                "Toegewezen (laatste bewaarde plan)": r["assigned"],
+                "Open (laatste bewaarde plan)": r["open"],
+                "Bezetting laatste plan (%)": r["coverage"],
+                "Plan-ID": r["plan_id"],
+            } for r in selected_rows]
+            frame = pd.DataFrame(formatted_rows)
+            st.dataframe(frame, hide_index=True, use_container_width=True)
+            st.caption("De toewijzingen en bezettingsgraad komen uit het laatst gepubliceerde plan, "
+                       "of uit het laatste concept als nog niets is gepubliceerd. "
+                       "Bij gewijzigde invoer zijn deze cijfers mogelijk verouderd.")
+            if selected_rows:
+                selected = st.selectbox("Details bekijken voor maand", selected_rows,
+                                        format_func=lambda r: f'{r["period"]} · {r["status"]}',
+                                        index=next((i for i, r in enumerate(selected_rows)
+                                            if (r["year"], r["month"]) == (data["year"], data["month"])), 0),
+                                        key="dashboard_detail_v014")
+                st.markdown(f'#### Aandachtspunten {selected["period"]}')
+                warnings = dashboard_warnings(selected)
+                for warning in warnings:
+                    st.warning(warning)
+                if not warnings:
+                    st.success("Geen openstaande aandachtspunten in dit basisoverzicht. "
+                               "Dit is geen volledige controle op wettelijke arbeidsregels.")
+                counts_requests = summarize_requests(leave_requests, swap_requests,
+                                                       selected["year"], selected["month"])
+                r1, r2, r3 = st.columns(3)
+                r1.metric("Verlof wacht op beslissing", counts_requests["leave_pending"])
+                r2.metric("Ruil wacht op collega", counts_requests["swaps_awaiting_colleague"])
+                r3.metric("Ruil wacht op planner", counts_requests["swaps_awaiting_planner"])
+                st.caption("Voor het behandelen van aanvragen gebruik je de afzonderlijke aanvraagtabbladen. "
+                           "Om deze maand te bewerken selecteer je ze links bij Kalendermaand.")
+            if len(selected_rows) > 1:
+                st.markdown("#### Dienstplaatsen per maand")
+                chart_data = pd.DataFrame([{
+                    "Maand": r["period"], "Benodigd": r["required_now"]
+                } for r in selected_rows]).set_index("Maand")
+                st.bar_chart(chart_data, use_container_width=True)
+            report_buffer = io.BytesIO()
+            with pd.ExcelWriter(report_buffer, engine="openpyxl") as writer:
+                frame.to_excel(writer, index=False, sheet_name="Maandoverzicht")
+            st.download_button("⬇️ Exporteer dashboard naar Excel", report_buffer.getvalue(),
+                               file_name="controleursplanning-dashboard-v014.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    else:
+        st.caption("In de demomodus worden geen opgeslagen maanden of aanvragen uit de database geladen.")
     st.info("Begin bij **Controleurs** en **Diensten**. Pas daarna in **Maandbehoefte** de te plannen diensten aan en klik in **Planning** op 'Bereken planning'.")
     if "last_plan" in st.session_state:
         plan = st.session_state.last_plan
