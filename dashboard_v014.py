@@ -20,8 +20,8 @@ def summarize_month(snapshot: dict) -> dict:
     concept = snapshot.get("latest_plan")
     published = snapshot.get("published_plan")
     plan = published or concept  # The published schedule is authoritative for display.
-    demand = payload.get("demand", [])
-    required_now = sum(_whole(r.get("required")) for r in demand)
+    demand = payload.get("demand") or []
+    required_now = sum(_whole(r.get("required")) for r in demand if isinstance(r, dict))
 
     if published:
         up_to_date = published["revision"] == revision
@@ -51,8 +51,8 @@ def summarize_month(snapshot: dict) -> dict:
         "year": year, "month": month, "period": f"{month:02d}/{year}",
         "status": status, "input_revision": revision, "up_to_date": up_to_date,
         "demand_lines": len(demand), "required_now": required_now,
-        "task_places": sum(_whole(t.get("required")) for t in payload.get("task_needs", [])),
-        "preferences": len(payload.get("preferences", [])),
+        "task_places": sum(_whole(t.get("required")) for t in (payload.get("task_needs") or []) if isinstance(t, dict)),
+        "preferences": len(payload.get("preferences") or []),
         "assigned": assigned, "open": open_places, "coverage": coverage,
         "plan_id": plan["id"] if plan else None,
         "plan_kind": "Gepubliceerd" if published else "Concept" if concept else "Geen",

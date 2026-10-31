@@ -272,21 +272,36 @@ def dashboard_month_snapshots(engine, actor: str) -> list[dict]:
             if entry["latest_plan"] is None:
                 entry["latest_plan"] = p
             pub = entry["published_plan"]
-            if p.published_at is not None and (pub is None or
-                    (p.published_at, p.id) > (pub.published_at, pub.id)):
-                entry["published_plan"] = p
+            if p.published_at is not None:
+                # Timestampwaarden uit oude bestanden kunnen qua tzinfo
+                # verschillen. Vergelijk UTC-tijdstempels i.p.v. datetime-objecten.
+                from datetime import timezone
+                def published_order(v):
+                    date_value = v.published_at
+                    if date_value.tzinfo is None:
+                        date_value = date_value.replace(tzinfo=timezone.utc)
+                    return (date_value.timestamp(), v.id)
+                if pub is None or published_order(p) > published_order(pub):
+                    entry["published_plan"] = p
         output = []
         for m in months:
             year, month = divmod(m.period, 100)
             versions_for_month = by_period.get(m.period, {})
             def small_plan(p):
-                return None if p is None else {
-                    "id": p.id, "revision": p.workspace_revision,
-                    "payload": {"summary": p.payload.get("summary", {})},
-                }
+                if p is None:
+                    return None
+                # Historische planpayloads kunnen een onvolledig of anders
+                # gevormd summary-object bevatten. Laat dat het dashboard
+                # niet volledig laten crashen.
+                raw_payload = p.payload if isinstance(p.payload, dict) else {}
+                summary = raw_payload.get("summary", {})
+                return {"id": p.id, "revision": p.workspace_revision,
+                        "payload": {"summary": summary if isinstance(summary, dict) else {}}}
+            raw = m.payload if isinstance(m.payload, dict) else {}
             output.append({
                 "year": year, "month": month, "revision": m.revision,
-                "workspace": {k: m.payload.get(k, []) for k in ("demand", "task_needs", "preferences")},
+                "workspace": {k: raw.get(k) if isinstance(raw.get(k), list) else []
+                              for k in ("demand", "task_needs", "preferences")},
                 "latest_plan": small_plan(versions_for_month.get("latest_plan")),
                 "published_plan": small_plan(versions_for_month.get("published_plan")),
             })

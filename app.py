@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import json
 import os
 from dataclasses import asdict
@@ -29,7 +30,7 @@ from swap_v011 import regular_assignments
 from month_copy_v013 import copy_month_demand_rows
 from dashboard_v014 import summarize_month, summarize_requests, dashboard_warnings, dashboard_counts
 
-st.set_page_config(page_title="Controleursplanning | v0.14", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.14.1", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -441,7 +442,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.14 • Maanddashboard • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.14.1 • Dashboardcorrectie • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -497,17 +498,42 @@ if screen == "Overzicht":
     st.caption(f"Takencatalogus: {len(data.get('tasks', []))} taken, {len(data.get('task_needs', []))} ingeplande taakblokken.")
     if PERSISTENT:
         st.markdown("### Planningstatus en opvolging")
+        # Een fout in oude planversies of in het aanvraagoverzicht mag de
+        # rest van de webapp en het gewone maandoverzicht niet blokkeren.
+        overview_rows = []
         try:
             snapshots = store.dashboard_month_snapshots(engine, current_user["employee_id"])
-            overview_rows = [summarize_month(s) for s in snapshots]
+            overview_rows = [summarize_month(snapshot) for snapshot in snapshots]
+        except ValueError as error:
+            logging.exception("DASHBOARD_V0141_MONTHS: ongeldige maandstatus of ontbrekende rechten")
+            st.error(f"Maandstatus niet beschikbaar ({type(error).__name__}). "
+                     "Bekijk de Streamlit-logboeken bij DASHBOARD_V0141_MONTHS.")
+        except Exception as error:
+            logging.exception("DASHBOARD_V0141_MONTHS: fout tijdens ophalen of samenvatten")
+            st.error(f"Maandstatus niet beschikbaar ({type(error).__name__}). "
+                     "Bekijk de Streamlit-logboeken bij DASHBOARD_V0141_MONTHS.")
+
+        leave_requests, swap_requests = [], []
+        leave_ok, swap_ok = True, True
+        try:
             leave_requests = store.list_leave_requests(engine, current_user["employee_id"])
+        except Exception as error:
+            leave_ok = False
+            logging.exception("DASHBOARD_V0141_LEAVE: verlofaanvragen konden niet worden opgehaald")
+            st.warning(f"Verlofstatistieken tijdelijk niet beschikbaar ({type(error).__name__}). "
+                       "Details: DASHBOARD_V0141_LEAVE in de logboeken.")
+        try:
             swap_requests = store.list_swap_requests(engine, current_user["employee_id"])
-        except (ValueError, store.ConflictError):
-            st.error("Dashboard niet beschikbaar: onvoldoende rechten of tegenstrijdige gegevens.")
-            st.stop()
-        except Exception:
-            st.error("Het beheerdersdashboard kon niet worden geladen. Controleer de database-logboeken.")
-            st.stop()
+        except Exception as error:
+            swap_ok = False
+            logging.exception("DASHBOARD_V0141_SWAP: ruilaanvragen konden niet worden opgehaald")
+            st.warning(f"Ruilstatistieken tijdelijk niet beschikbaar ({type(error).__name__}). "
+                       "Details: DASHBOARD_V0141_SWAP in de logboeken.")
+        # Deze tellers zijn bij een ontbrekende bron onbekend, niet nul.
+        requests_available = leave_ok and swap_ok
+        if not overview_rows:
+            st.info("Het bovenste maandoverzicht blijft beschikbaar. "
+                    "De uitgebreide maandstatus wordt pas getoond zodra de rapportagequery weer slaagt.")
         if overview_rows:
             counts = dashboard_counts(overview_rows)
             k1, k2, k3, k4 = st.columns(4)
@@ -547,12 +573,15 @@ if screen == "Overzicht":
                 if not warnings:
                     st.success("Geen openstaande aandachtspunten in dit basisoverzicht. "
                                "Dit is geen volledige controle op wettelijke arbeidsregels.")
-                counts_requests = summarize_requests(leave_requests, swap_requests,
-                                                       selected["year"], selected["month"])
-                r1, r2, r3 = st.columns(3)
-                r1.metric("Verlof wacht op beslissing", counts_requests["leave_pending"])
-                r2.metric("Ruil wacht op collega", counts_requests["swaps_awaiting_colleague"])
-                r3.metric("Ruil wacht op planner", counts_requests["swaps_awaiting_planner"])
+                if requests_available:
+                    counts_requests = summarize_requests(leave_requests, swap_requests,
+                                                           selected["year"], selected["month"])
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("Verlof wacht op beslissing", counts_requests["leave_pending"])
+                    r2.metric("Ruil wacht op collega", counts_requests["swaps_awaiting_colleague"])
+                    r3.metric("Ruil wacht op planner", counts_requests["swaps_awaiting_planner"])
+                else:
+                    st.info("Aanvraagstatistieken zijn niet volledig beschikbaar; geen nulwaarden aangenomen.")
                 st.caption("Voor het behandelen van aanvragen gebruik je de afzonderlijke aanvraagtabbladen. "
                            "Om deze maand te bewerken selecteer je ze links bij Kalendermaand.")
             if len(selected_rows) > 1:

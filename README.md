@@ -1,55 +1,33 @@
-# Controleursplanning v0.14 — Beheerdersdashboard
+# Controleursplanning v0.14.1 — Herstel beheerdersdashboard
 
-**Dit blijft een proefproject met uitsluitend fictieve gegevens.** De bestaande versie 0.13 blijft de basis. Versie 0.14 voegt een **alleen-lezen dashboard** toe; de planningsmotor, gebruikersaccounts, verlof/ruilen en de maandkopieerfunctie zijn niet gewijzigd.
+Deze versie is een **gerichte correctie** op v0.14. Het kan voorkomen dat de eerste vier metrieken correct verschijnen, terwijl onder `Planningstatus en opvolging` een generieke foutmelding staat. De databaseverbinding werkt dan voor het hoofdscherm; de fout bevindt zich mogelijk in de extra dashboardquery of verwerking van oudere planresultaten.
 
-## Nieuw in versie 0.14
+## Wat is aangepast?
 
-In **Overzicht** ziet de planner of beheerder:
+- Onvolledige of oudere resultaten zonder een bruikbare `summary` veroorzaken niet meteen een dashboardcrash. Onbekende plancijfers worden leeg gelaten, niet als nul weergegeven.
+- De selectie van de nieuwste publicatie kan geen fout meer geven door een mix van tijdstempels met en zonder tijdzone.
+- Opvragen van maandstatus, verlof en ruilen gebeurt afzonderlijk: een probleem in één onderdeel blokkeert de rest van het dashboard niet.
+- Als een databron toch faalt, staat de technische traceback in de **Streamlit Community Cloud-logs** met één van de zoektermen `DASHBOARD_V0141_MONTHS`, `DASHBOARD_V0141_LEAVE` of `DASHBOARD_V0141_SWAP`. De interface toont alleen het type fout, geen database-URL of wachtwoorden.
+- **Geen** databaseverwijdering, datamigratie of wijziging aan de OR-Tools-planningsmotor.
 
-- Alle reeds aangemaakte kalendermaanden, inclusief filter op kalenderjaar.
-- De status per maand: leeg, in voorbereiding, conceptplanning, gepubliceerd, gepubliceerd met nieuw concept of verouderde invoer.
-- De huidige maandbehoefte (aantal dienstregels en vereiste dienstplaatsen), taakplaatsen en voorkeuren.
-- De bezettingsgraad, openstaande plaatsen en toegewezen plaatsen uit de **laatst gepubliceerde planning**, of — als er geen publicatie is — het laatste opgeslagen concept.
-- Een waarschuwing bij ontbrekende planning, openstaande plaatsen of gewijzigde invoer na de planberekening.
-- Het aantal openstaande verlofaanvragen, ruilvoorstellen die wachten op de collega en ruilaanvragen die wachten op een beheerder (per gekozen maand).
-- Een eenvoudige grafiek van benodigde dienstplaatsen per maand, plus Excel-export van het overzicht.
+## Bijwerken via GitHub
 
-Dit dashboard **wijzigt niets** aan de maandplanningen of personeelsgegevens. Je blijft maanden openen met de bestaande kalendermaandkiezer in de zijbalk. Controleurs zien deze beheerdersinformatie niet.
+1. Bewaar een herstelpunt van de werkende v0.13/v0.14-commit en maak een databaseback-up.
+2. Upload **alle bestanden uit deze ZIP** naar de bestaande privérepository, zodat zowel `app.py`, `store.py` als `dashboard_v014.py` worden bijgewerkt.
+3. Laat `DATABASE_URL`, gebruikersaccounts en overige Streamlit Secrets ongewijzigd. De herstelcode `ADMIN_RECOVERY_KEY` moet verwijderd blijven als hij al gebruikt werd.
+4. Laat Streamlit de app opnieuw uitrollen en open **Overzicht → Planningstatus en opvolging**.
+5. Controleer of de maanden, statussen en bezettingsgraad verschijnen en of bestaande planningen ongewijzigd zijn.
 
-**Belangrijk onderscheid:** een berekend rooster is niet per definitie gepubliceerd. Bij een nieuwer concept blijven de cijfers van de gepubliceerde planning leidend. Bij een verouderde publicatie wordt de revisieafwijking zichtbaar gemeld. De bezettingscijfers van een verouderd plan zijn **historische uitkomsten** en mogen niet gelezen worden als actuele bezetting. Het dashboard vergelijkt de revisies van maandinvoer; wijzigingen in een gedeelde catalogus die niet tot een nieuwe maandrevisie leiden, kunnen nog onopgemerkt blijven. Het is geen wettelijke arbeidscontrole of live dienstuitvoering.
+**Als het onderdeel nog niet laadt:** open https://share.streamlit.io, selecteer de app, klik op `Manage app` en open **Logs**. Zoek naar de regel `DASHBOARD_V0141_MONTHS`, `DASHBOARD_V0141_LEAVE` of `DASHBOARD_V0141_SWAP`. Deel alleen de foutsoort en relevante tracebackregels; verwijder eventuele database-URL's, tokens, wachtwoorden en personeelsgegevens. Daarmee kunnen we de exacte oorzaak oplossen. De huidige screenshot alleen toont die technische oorzaak niet.
 
-## Installeren
+## Status en beperkingen
 
-1. Maak eerst een databaseback-up en bewaar de laatst werkende v0.13-commit op GitHub.
-2. Pak het ZIP-bestand uit en upload **alle bestanden uit de ZIP** naar de hoofdmap van jouw bestaande privérepository.
-3. Voeg zeker het nieuwe bestand `dashboard_v014.py` toe; de bestaande `app.py` en `store.py` worden ook bijgewerkt.
-4. Laat `DATABASE_URL`, jouw beheerdersaccount en overige Streamlit Secrets ongewijzigd. Laat `ADMIN_RECOVERY_KEY` verwijderd.
-5. Streamlit zal opnieuw uitrollen. Meld je aan als beheerder of planner en open **Overzicht**.
+Lokale syntaxcontrole en automatische tests zijn uitgevoerd op deze versie. De volledige Streamlit-interface en jouw PostgreSQL-database zijn niet toegankelijk in deze ontwikkelomgeving, dus deze correctie is nog niet op jouw hostingomgeving geverifieerd. Het is nog steeds een testapp voor fictieve gegevens, niet geschikt voor operationele personeelsplanning.
 
-**Er is geen migratie of nieuwe database nodig.** De uitbreiding leest de huidige werkruimtes en planversies alleen uit. De opslagstructuur is ongewijzigd.
-
-## Aanbevolen test op Streamlit
-
-1. Controleer of november en december zichtbaar zijn in het overzicht. Verander van kalenderjaar met het filter als je meerdere jaren hebt.
-2. Bekijk de status van je eerder **gepubliceerde** maand. Controleer of de bezettingsgraad van die planversie zichtbaar is.
-3. Kijk bij een maand met dienstbehoefte maar zonder berekening: status **In voorbereiding**, bezettingsgraad blijft leeg in plaats van foutief 0%.
-4. Selecteer een maand in de detailkeuze. Eventuele openstaande plaatsen en openstaande verlof-/ruilaanvragen moeten als aandachtspunt verschijnen.
-5. Exporteer het Excel-overzicht, open het en controleer de cijfers.
-6. Ga daarna naar **Planning** en controleer dat de OR-Tools-berekening en de bestaande kopieerfunctie van v0.13 nog werken.
-
-## Grenzen van deze release
-
-- Uitsluitend testgegevens; geen daadwerkelijke inzet of persoonsgegevens zonder beoordeling door De Lijn.
-- Het dashboard toont opgeslagen berekeningen, geen actuele dienstuitvoering en geen continue voortgang van de solver.
-- Bij gewijzigde maandinvoer kan de laatst gepubliceerde planning verouderd zijn; publicatie gebeurt nog steeds alleen via **Planning**.
-- Reeds genoemde beperkingen op volledige arbeidsrechtelijke validatie, maandgrenscontroles, productiebeveiliging en back-ups blijven bestaan.
-
-## Tests
+## Zelf tests uitvoeren
 
 ```bash
 python -m pip install -r requirements.txt
 python -m pip install pytest
 python -m pytest -q
 ```
-
-Tijdens het samenstellen van versie 0.14: **92 tests geslaagd, 8 overgeslagen** omdat OR-Tools in deze testomgeving niet aanwezig was. De Streamlit-interface is in deze omgeving niet live getest; test de nieuwe dashboardweergave op je eigen Streamlit Community Cloud-app.
