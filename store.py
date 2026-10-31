@@ -16,6 +16,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.exc import IntegrityError
 
 from demo_data import build_demo
+from months_v012 import period_key, shared_fields, merge_shared, new_month_payload
 from requests_v010 import leave_days, absence_credit
 from swap_v011 import make_swap_plan, verify_swap_with_solver
 
@@ -49,6 +50,21 @@ class Workspace(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class MonthWorkspace(Base):
+    """Afzonderlijke conceptinvoer per kalendermaand; index = YYYYMM."""
+    __tablename__ = "month_workspaces"
+    period: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class SharedCatalog(Base):
+    """Eén catalogus van controleurs, dienstnummers, regels en taaktypes."""
+    __tablename__ = "shared_catalog"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
 class PlanningVersion(Base):
@@ -195,6 +211,141 @@ def authenticate(engine, employee_id: str, password: str) -> dict | None:
         a.failed_logins = 0
         a.locked_until = None
         return public_account(a)
+
+
+def initialize_months(engine) -> None:
+    """Niet-destructieve migratie van de v0.11-werkruimte, telkens idempotent.
+
+    De oude Workspace-tabel wordt bewust NIET verwijderd/gewijzigd en vormt
+    een herstelpunt. Gepubliceerde planningen blijven onaangetast.
+    """
+    with session_factory(engine).begin() as s:
+        legacy = s.get(Workspace, 1)
+        if legacy is None:
+            raise SetupError("De bestaande werkruimte ontbreekt.")
+        shared = s.get(SharedCatalog, 1)
+        if shared is None:
+            s.add(SharedCatalog(id=1, payload=shared_fields(legacy.payload)))
+        period = period_key(int(legacy.payload["year"]), int(legacy.payload["month"]))
+        if s.get(MonthWorkspace, period) is None:
+            s.add(MonthWorkspace(period=period, payload=legacy.payload, revision=legacy.revision))
+
+
+def list_month_workspaces(engine) -> list[dict]:
+    """De bestaande maanden tonen, met afzonderlijke concept- en publicatiestatus."""
+    initialize_months(engine)
+    with session_factory(engine)() as s:
+        rows = s.scalars(select(MonthWorkspace).order_by(MonthWorkspace.period)).all()
+        summaries = []
+        for w in rows:
+            year, month = divmod(w.period, 100)
+            published = s.scalar(select(PlanningVersion.id).where(
+                PlanningVersion.year == year, PlanningVersion.month == month,
+                PlanningVersion.published_at.is_not(None)).order_by(
+                    PlanningVersion.published_at.desc(), PlanningVersion.id.desc()).limit(1))
+            summaries.append({"year": year, "month": month, "revision": w.revision,
+                              "published": bool(published),
+                              "has_demand": bool(w.payload.get("demand", []))})
+        return summaries
+
+
+def create_month_workspace(engine, year: int, month: int, actor: str) -> None:
+    period = period_key(year, month)
+    initialize_months(engine)
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Alleen beheerders en planners mogen maanden aanmaken.")
+        shared = s.scalar(select(SharedCatalog).where(SharedCatalog.id == 1).with_for_update())
+        if s.get(MonthWorkspace, period):
+            raise ValueError("Deze maand bestaat al. Selecteer ze in het overzicht.")
+        # Basis = gedeelde mastergegevens + lege maandvelden. Geen automatische
+        # kopie van de dienstbehoefte of persoonsgebonden wensen/verlof.
+        legacy = s.get(Workspace, 1)
+        template = merge_shared(legacy.payload, shared.payload)
+        state = new_month_payload(year, month, template)
+        s.add(MonthWorkspace(period=period, payload=state, revision=1))
+        _audit(s, actor, f"Nieuwe maand {year}-{month:02d} aangemaakt")
+
+
+def load_month_workspace(engine, year: int, month: int) -> tuple[dict, int]:
+    initialize_months(engine)
+    with session_factory(engine)() as s:
+        row = s.get(MonthWorkspace, period_key(year, month))
+        if row is None:
+            raise ValueError("Deze maand bestaat nog niet. Maak ze eerst aan.")
+        shared = s.get(SharedCatalog, 1)
+        return merge_shared(row.payload, shared.payload), row.revision
+
+
+def _approved_leave_protected(s, payload: dict) -> None:
+    year, month = int(payload["year"]), int(payload["month"])
+    for leave in s.scalars(select(LeaveRequest).where(LeaveRequest.status == "approved")).all():
+        if not (leave.start_date.year <= year <= leave.end_date.year):
+            continue
+        approved = [absence_credit(leave.employee_id, day, leave.hours_per_day)
+                    for day in leave_days(leave.start_date, leave.end_date, year, month)]
+        for entry in approved:
+            if entry not in payload.get("hour_credits", []):
+                raise ValueError("Een goedgekeurde verlofdag mag niet zomaar gewijzigd of gewist worden.")
+
+
+def save_month_workspace(engine, payload: dict, expected_revision: int, actor: str,
+                         action: str) -> int:
+    """Maandgebonden en globale wijzigingen atomair met conflictcontrole.
+
+    Een globale wijziging verhoogt ook de revisie van andere maanden, zodat
+    reeds berekende (niet opnieuw gevalideerde) plannen niet meer publiceerbaar zijn.
+    """
+    year, month = int(payload["year"]), int(payload["month"])
+    key = period_key(year, month)
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active:
+            raise ValueError("Geen toegangsrechten.")
+        shared = s.scalar(select(SharedCatalog).where(SharedCatalog.id == 1).with_for_update())
+        row = s.scalar(select(MonthWorkspace).where(MonthWorkspace.period == key).with_for_update())
+        if row is None or row.revision != expected_revision or shared is None:
+            raise ConflictError("De maandgegevens zijn elders aangepast. Vernieuw en probeer opnieuw.")
+        original = merge_shared(row.payload, shared.payload)
+        if who.role == "controleur":
+            old = deepcopy(original)
+            new = deepcopy(payload)
+            old_prefs = old.pop("preferences")
+            new_prefs = new.pop("preferences")
+            if (old != new or
+                [p for p in old_prefs if p["employee_id"] != actor] !=
+                [p for p in new_prefs if p["employee_id"] != actor]):
+                raise ValueError("Controleurs mogen alleen hun eigen voorkeuren aanpassen.")
+        elif who.role not in ("admin", "planner"):
+            raise ValueError("Geen toegangsrechten.")
+        _approved_leave_protected(s, payload)
+        new_shared = shared_fields(payload)
+        changed_global = new_shared != shared.payload
+        if changed_global:
+            if who.role == "controleur":
+                raise ValueError("Geen rechten om de catalogus te wijzigen.")
+            shared.payload = new_shared
+            # Maak bestaande concepten ongeldig na gewijzigde gedeelde catalogus.
+            for other in s.scalars(select(MonthWorkspace)).all():
+                if other.period != key:
+                    other.revision += 1
+        row.payload = payload
+        row.revision += 1
+        _audit(s, actor, f"{year}-{month:02d}: {action}" +
+               (" (gedeelde catalogus aangepast)" if changed_global else ""))
+        return row.revision
+
+
+def _period_workspace(s, year: int, month: int):
+    """v0.12 gebruikt een maandrij; legacy tests zonder migratie gebruiken Workspace."""
+    row = s.get(MonthWorkspace, period_key(year, month))
+    if row is not None:
+        return row
+    legacy = s.get(Workspace, 1)
+    if legacy and (legacy.payload["year"], legacy.payload["month"]) == (year, month):
+        return legacy
+    return None
 
 
 def load_workspace(engine) -> tuple[dict, int]:
@@ -356,7 +507,7 @@ def save_plan(engine, data: dict, workspace_revision: int, result: dict, actor: 
         who = s.get(Account, actor)
         if who is None or who.role not in ("admin", "planner") or not who.active:
             raise ValueError("Geen rechten om een planning te berekenen.")
-        w = s.scalar(select(Workspace).where(Workspace.id == 1).with_for_update())
+        w = _period_workspace(s, int(data["year"]), int(data["month"]))
         if w is None or w.revision != workspace_revision:
             raise ConflictError("De invoergegevens zijn tijdens de berekening veranderd. Vernieuw en bereken opnieuw.")
         row = PlanningVersion(workspace_revision=workspace_revision, year=data["year"], month=data["month"],
@@ -386,8 +537,8 @@ def publish_plan(engine, plan_id: int, expected_revision: int, actor: str) -> No
         who = s.get(Account, actor)
         if who is None or who.role not in ("admin", "planner") or not who.active:
             raise ValueError("Geen rechten om een planning te publiceren.")
-        w = s.scalar(select(Workspace).where(Workspace.id == 1).with_for_update())
         row = s.get(PlanningVersion, plan_id)
+        w = _period_workspace(s, row.year, row.month) if row else None
         if row is None or w is None or w.revision != expected_revision or row.workspace_revision != expected_revision:
             raise ConflictError("Deze planning is verouderd. Bereken opnieuw met de actuele invoergegevens.")
         if row.payload.get("status") not in ("OPTIMAL", "FEASIBLE"):
@@ -439,11 +590,14 @@ def request_leave(engine, employee_id: str, start: date, end: date) -> int:
         who = s.get(Account, employee_id)
         if who is None or who.role != "controleur" or not who.active:
             raise ValueError("Alleen een actieve controleur kan eigen verlof aanvragen.")
-        w = s.scalar(select(Workspace).where(Workspace.id == 1).with_for_update())
-        if w is None or not any(e["id"] == employee_id and e.get("active", True)
-                                for e in w.payload["employees"]):
+        w = _period_workspace(s, start.year, start.month)
+        if w is None or (start.year, start.month) != (end.year, end.month):
+            raise ValueError("Kies een periode binnen één aangemaakte planningsmaand.")
+        state = merge_shared(w.payload, s.get(SharedCatalog, 1).payload) if isinstance(w, MonthWorkspace) else w.payload
+        if not any(e["id"] == employee_id and e.get("active", True)
+                   for e in state["employees"]):
             raise ValueError("Dit account is niet aan een actieve controleur gekoppeld.")
-        dates = leave_days(start, end, int(w.payload["year"]), int(w.payload["month"]))
+        dates = leave_days(start, end, int(state["year"]), int(state["month"]))
         for other in s.scalars(select(LeaveRequest).where(
                 LeaveRequest.employee_id == employee_id,
                 LeaveRequest.status.in_(("pending", "approved")))).all():
@@ -499,21 +653,22 @@ def decide_leave_request(engine, request_id: int, actor: str, approve: bool,
         who = s.get(Account, actor)
         if not who or not who.active or who.role not in ("admin", "planner"):
             raise ValueError("Alleen beheerders of planners mogen beslissen.")
-        w = s.scalar(select(Workspace).where(Workspace.id == 1).with_for_update())
         row = s.scalar(select(LeaveRequest).where(LeaveRequest.id == request_id).with_for_update())
+        w = _period_workspace(s, row.start_date.year, row.start_date.month) if row else None
         if not row or row.status != "pending":
             raise ValueError("Deze aanvraag is niet meer in behandeling.")
         if w is None:
             raise ValueError("Werkruimte ontbreekt.")
+        state = merge_shared(w.payload, s.get(SharedCatalog, 1).payload) if isinstance(w, MonthWorkspace) else w.payload
         days = leave_days(row.start_date, row.end_date,
-                          int(w.payload["year"]), int(w.payload["month"]))
+                          int(state["year"]), int(state["month"]))
         if approve:
             if not isinstance(hours_per_day, (int, float)) or not 0 <= hours_per_day <= 16:
                 raise ValueError("Testuren moeten tussen 0 en 16 liggen.")
             if not any(e["id"] == row.employee_id and e.get("active", True)
-                       for e in w.payload["employees"]):
+                       for e in state["employees"]):
                 raise ValueError("Controleur bestaat niet meer of is niet actief.")
-            payload = dict(w.payload)
+            payload = dict(state)
             credits = list(payload.get("hour_credits", []))
             existing = {(c["employee_id"], c["date"]) for c in credits}
             additions = [absence_credit(row.employee_id, day, float(hours_per_day)) for day in days]
@@ -568,9 +723,9 @@ def request_swap(engine, actor: str, colleague: str, own_day: date, own_shift: s
             raise ValueError("Alleen actieve controleurs kunnen een ruil voorstellen.")
         if not other or not other.active or other.role != "controleur" or other.employee_id == actor:
             raise ValueError("De voorgestelde ruil is niet mogelijk. Controleer de gegevens.")
-        w = s.scalar(select(Workspace).where(Workspace.id == 1).with_for_update())
+        w = _period_workspace(s, own_day.year, own_day.month)
         if w is None:
-            raise SetupError("Werkruimte ontbreekt.")
+            raise SetupError("De opgegeven planningsmaand ontbreekt.")
         y, m = int(w.payload["year"]), int(w.payload["month"])
         if any((day.year, day.month) != (y, m) for day in (own_day, their_day)):
             raise ValueError("Een ruil moet binnen de actieve planningsmaand vallen.")
@@ -644,9 +799,9 @@ def decide_swap(engine, request_id: int, actor: str, approve: bool, validator=No
             raise ValueError("Geen beheerrechten.")
         if r is None or r.status != "accepted":
             raise ValueError("De collega moet eerst akkoord gaan.")
-        w = s.get(Workspace, 1)
+        w = _period_workspace(s, r.own_day.year, r.own_day.month)
         if w is None:
-            raise SetupError("Werkruimte ontbreekt.")
+            raise SetupError("De betreffende planningsmaand ontbreekt.")
         published = _current_published(s, int(w.payload["year"]), int(w.payload["month"]))
         if published is None or published.id != r.plan_id or published.workspace_revision != w.revision:
             raise ConflictError("De gepubliceerde planning is gewijzigd. Deze ruil is verouderd.")
@@ -654,13 +809,14 @@ def decide_swap(engine, request_id: int, actor: str, approve: bool, validator=No
         candidate = make_swap_plan(source_plan, r.initiator_id, r.colleague_id,
                                    r.own_day.isoformat(), r.own_shift,
                                    r.their_day.isoformat(), r.their_shift)
-        workspace_snapshot = w.payload
+        workspace_snapshot = (merge_shared(w.payload, s.get(SharedCatalog, 1).payload)
+                              if isinstance(w, MonthWorkspace) else w.payload)
         old_id = published.id
     if approve:
         (validator or verify_swap_with_solver)(workspace_snapshot, candidate, source_plan)
     with session_factory(engine).begin() as s:
-        w = s.scalar(select(Workspace).where(Workspace.id == 1).with_for_update())
         r = s.scalar(select(SwapRequest).where(SwapRequest.id == request_id).with_for_update())
+        w = _period_workspace(s, r.own_day.year, r.own_day.month) if r else None
         who = s.get(Account, actor)
         if not who or not who.active or who.role not in ("admin", "planner"):
             raise ValueError("Geen beheerrechten.")

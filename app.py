@@ -27,7 +27,7 @@ from daily_v091 import days_in_month, shifts_by_day, current_daily_choices, upda
 from requests_v010 import STATUS_LABELS
 from swap_v011 import regular_assignments
 
-st.set_page_config(page_title="Controleursplanning | v0.11", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.12", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -167,8 +167,11 @@ def replace_data(updated: dict) -> None:
         st.error("Gegevens niet opgeslagen: " + " ".join(errors))
         st.stop()
     if PERSISTENT:
+        if (updated.get("year"), updated.get("month")) != tuple(st.session_state.active_period):
+            st.error("Je kunt de planningsmaand niet wijzigen door een JSON-bestand te laden. Selecteer de maand links.")
+            st.stop()
         try:
-            new_revision = store.save_workspace(
+            new_revision = store.save_month_workspace(
                 engine, updated, st.session_state.workspace_revision,
                 current_user["employee_id"], "Projectgegevens aangepast"
             )
@@ -338,23 +341,75 @@ def render_preferences(eid: str, scope: str) -> None:
                 replace_and_rerun(state)
 
 
+def reset_month_ui_state() -> None:
+    """Widgetstate wissen vóór Streamlit de widgets van de nieuwe maand opbouwt."""
+    selected = st.session_state.get("active_period")
+    keep = {"signed_id", "signed_hash", "active_period"}
+    for key in list(st.session_state):
+        if key not in keep:
+            del st.session_state[key]
+    st.session_state.loaded_period_v012 = selected
+
+
 if PERSISTENT:
     try:
-        loaded, revision = store.load_workspace(engine)
+        month_overview = store.list_month_workspaces(engine)
     except Exception:
-        st.error("De gedeelde gegevens konden niet worden opgehaald.")
+        st.error("De afzonderlijke maandwerkruimtes konden niet worden ingelezen. Controleer de database-logboeken.")
+        st.stop()
+    period_options = [(entry["year"], entry["month"]) for entry in month_overview]
+    if not period_options:
+        st.error("Geen planningsmaanden gevonden.")
+        st.stop()
+    requested_period = st.session_state.pop("switch_to_new_month_v012", None)
+    if requested_period in period_options:
+        # Voer de widgetwaardewijziging uit VOORDAT st.selectbox wordt gemaakt.
+        st.session_state.active_period = requested_period
+    if st.session_state.get("active_period") not in period_options:
+        # Bij eerste opstart behoudt de migratie de maand van versie 0.11.
+        st.session_state.active_period = period_options[0]
+    if st.session_state.get("loaded_period_v012") != st.session_state.active_period:
+        reset_month_ui_state()
+    with st.sidebar:
+        st.subheader("Kalendermaand")
+        selected_period = st.selectbox(
+            "Actieve planning", period_options, key="active_period", on_change=reset_month_ui_state,
+            format_func=lambda item: f"{item[1]:02d}/{item[0]}" +
+                (" · gepubliceerd" if any(m["year"] == item[0] and m["month"] == item[1]
+                                         and m["published"] for m in month_overview) else " · concept"),
+        )
+        if current_user["role"] in ("admin", "planner"):
+            with st.expander("➕ Nieuwe maand voorbereiden"):
+                next_year = selected_period[0] + (1 if selected_period[1] == 12 else 0)
+                next_month = 1 if selected_period[1] == 12 else selected_period[1] + 1
+                new_period_date = st.date_input("Nieuwe kalendermaand", date(next_year, next_month, 1),
+                                                format="DD/MM/YYYY")
+                if st.button("Maand aanmaken", key="create_month_v012"):
+                    try:
+                        chosen = (new_period_date.year, new_period_date.month)
+                        store.create_month_workspace(engine, *chosen, current_user["employee_id"])
+                        # Streamlit verbiedt het wijzigen van widgetwaarden
+                        # nadat de widget in dezelfde run is aangemaakt.
+                        st.session_state.switch_to_new_month_v012 = chosen
+                        st.rerun()
+                    except (ValueError, store.ConflictError) as error:
+                        st.error(str(error))
+        st.caption("Maandbehoefte, voorkeuren en afwezigheden zijn per maand gescheiden.")
+    try:
+        loaded, revision = store.load_month_workspace(engine, *selected_period)
+    except Exception:
+        st.error("De gekozen maand kon niet worden opgehaald.")
         st.stop()
     previous_revision = st.session_state.get("workspace_revision")
     st.session_state.project_data = loaded
     st.session_state.workspace_revision = revision
     if previous_revision is not None and previous_revision != revision:
-        # Een gelijktijdige wijziging mag geen oude, net ingediende formuliervelden overschrijven.
         st.session_state.remote_change_notice = True
-        # Formulierwaarden van vóór de externe wijziging mogen de nieuwe
-        # databasegegevens niet stilzwijgend overschrijven.
         for widget_key in list(st.session_state.keys()):
             if widget_key.startswith(("daily_choice_", "daily_priority_")):
                 del st.session_state[widget_key]
+        st.session_state.pop("last_plan", None)
+        st.session_state.pop("alternatives_v09", None)
         st.rerun()
 elif "project_data" not in st.session_state:
     st.session_state.project_data = build_demo()
@@ -363,7 +418,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.11 • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.12 • Meermaandenbeheer • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -396,6 +451,7 @@ with st.sidebar:
             except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
                 st.error(f"Kon gegevens niet laden: {exc}")
         if st.button("🔄 Fictieve voorbeeldgegevens herstellen", use_container_width=True):
+            st.warning("Let op: de gedeelde controleurs en dienstcatalogus worden hierdoor ook voor andere maanden aangepast.")
             replace_and_rerun(build_demo(data["year"], data["month"]))
     st.divider()
     st.caption("Niet gekoppeld aan systemen van De Lijn.")
@@ -416,6 +472,12 @@ if screen == "Overzicht":
     c.metric("Dienstplaatsen deze maand", sum(r["required"] for r in data["demand"]))
     d.metric("Vrijwensen", len(data["preferences"]))
     st.caption(f"Takencatalogus: {len(data.get('tasks', []))} taken, {len(data.get('task_needs', []))} ingeplande taakblokken.")
+    if PERSISTENT:
+        st.subheader("Overzicht aangemaakte kalendermaanden")
+        st.dataframe(pd.DataFrame([{"Maand": f"{r['month']:02d}/{r['year']}",
+                                   "Invoer": "Aanwezig" if r["has_demand"] else "Nog leeg",
+                                   "Gepubliceerd": "Ja" if r["published"] else "Nee"}
+                                  for r in month_overview]), hide_index=True, use_container_width=True)
     st.info("Begin bij **Controleurs** en **Diensten**. Pas daarna in **Maandbehoefte** de te plannen diensten aan en klik in **Planning** op 'Bereken planning'.")
     if "last_plan" in st.session_state:
         plan = st.session_state.last_plan
@@ -766,16 +828,8 @@ elif screen == "Taken":
 elif screen == "Maandbehoefte":
     st.subheader("Welke dienstnummers zijn op welke dagen nodig?")
     month_start = date(int(data["year"]), int(data["month"]), 1)
-    coly, colm = st.columns(2)
-    with st.form("month_form"):
-        with coly:
-            year = st.number_input("Jaar", 2025, 2040, int(data["year"]))
-        with colm:
-            month = st.selectbox("Maand", range(1, 13), index=int(data["month"])-1)
-        if st.form_submit_button("Andere testmaand starten (wist huidige demo-invoer)"):
-            if (year, month) != (data["year"], data["month"]):
-                replace_and_rerun(build_demo(int(year), int(month)))
-    st.caption("Let op: in v0.3 is nog maar één testmaand tegelijk bewerkbaar. Exporteer eerst je JSON vóór je de maand wijzigt.")
+    st.info("Je werkt nu in **" + f"{data['month']:02d}/{data['year']}" +
+            "**. Kies een andere maand links in het zijmenu. Een nieuwe maand begint met een lege dienstbehoefte.")
     st.dataframe(pd.DataFrame(data["demand"]), hide_index=True, use_container_width=True, height=300)
     with st.form("demand_form"):
         a,b,c = st.columns(3)

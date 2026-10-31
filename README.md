@@ -1,41 +1,51 @@
-# Controleursplanning v0.11 — Ruilaanvragen
+# Controleursplanning v0.12 — Meerdere kalendermaanden
 
-**Uitsluitend fictieve testgegevens. Geen bedrijfsgereed rooster.** Bouwt voort op werkende v0.10, met behoud van de bestaande PostgreSQL-database, login, OR-Tools-model en verlofaanvragen.
+**Testapplicatie met fictieve gegevens.** Voortbouwend op v0.11 (Streamlit, PostgreSQL en OR-Tools). Deze release introduceert **een werkruimte per kalendermaand** zonder oudere gepubliceerde planningen te overschrijven.
 
-## Nieuw
+## Wat verandert er?
 
-- Controleur opent **Mijn ruilaanvragen**, selecteert een eigen reguliere dienst uit de *actuele gepubliceerde planning*, vult het personeelsnummer van de collega in, en kiest diens datum en dienstnummer. Er is geen onbeperkte inzage in de volledige collega'splanning nodig.
-- De collega ziet een inkomende aanvraag, en kan **akkoord gaan** of afwijzen. De aanvrager kan de nog niet bevestigde aanvraag intrekken.
-- Daarna ziet de planner/beheerder de geaccepteerde aanvraag bij **Ruilaanvragen beheren**. Afkeuren verandert niets.
-- Bij definitieve goedkeuring controleert **Google OR-Tools het complete bestaande maandrooster met alle oorspronkelijke personeels- en taaktoewijzingen vastgezet**, behalve de twee daadwerkelijk geruilde reguliere diensten. De solver controleert daarmee dezelfde harde regels als bij een normale berekening. Bij een mislukte controle of time-out vindt geen publicatie plaats.
-- Een goedgekeurde ruil wordt **atomair als nieuwe gepubliceerde planversie opgeslagen**, zonder oude planningen te wijzigen. Beide controleurs zien hun bijgewerkte eigen rooster. Er is een auditgebeurtenis.
-- Oude aanvragen worden bij een gewijzigde gepubliceerde planversie of databasewerkruimte **geweigerd**; maak een nieuwe aanvraag op basis van het nieuwe rooster.
-- De ruil van diensten met al toegewezen specifieke taken wordt nog geweigerd: taken horen bij een persoon en vereisen afzonderlijke herplanning. Evenmin worden zelfstandige taaktoewijzingen geruild.
+- In het **linkermenu** verschijnt **Kalendermaand**. Controleurs kunnen bestaande maanden selecteren om hun eigen voorkeuren of gepubliceerde planning te bekijken.
+- De beheerder/planner kan met **Nieuwe maand voorbereiden** een volgende maand aanmaken, ook meerdere maanden vooruit.
+- Een nieuwe maand krijgt automatisch de **bestaande controleurs, dienstcatalogus, taakcatalogus, algemene regels en opgeslagen optimalisatieprofielen**, maar begint **zonder** maandbehoefte, voorkeuren, activiteiten, taakbehoeften of verlofdagen.
+- **November en december zijn onafhankelijk:** wijzigingen aan maandbehoefte, individuele voorkeuren en afwezigheden worden per kalendermaand bewaard. Eerdere concept- en gepubliceerde planningen blijven in `planning_versions` staan.
+- Accounts blijven globaal geldig. Verlofaanvragen en ruilaanvragen worden aan de **maand van de betrokken dienst/datum** gekoppeld. De huidige verlofaanvragen ondersteunen één maand per aanvraag; voor meer maanden maak je afzonderlijke aanvragen.
+- Bij een wijziging aan gedeelde controleurs, diensten, taken of instellingen geldt die voortaan voor **alle bewerkbare maanden**; opgeslagen gepubliceerde roosters zelf blijven ongewijzigd. Bestaande concepten kunnen hierdoor verouderd worden en een nieuwe berekening vereisen.
+- Maandwissel wist de *lokale Streamlit-formulierstatus*, niet de databasegegevens. Daardoor blijven de invoervelden en berekende alternatieven van de vorige maand niet onbedoeld actief.
 
-## Update vanuit v0.10
+## Installatie op je bestaande GitHub + Streamlit-app
 
-1. Maak een herstelpunt van de werkende GitHub-commit en maak een **echte PostgreSQL-back-up**.
-2. Pak `controleursplanning-github-streamlit-v011.zip` uit en upload alles naar dezelfde *private* GitHub-repository.
-3. **Nieuw bestand**: `swap_v011.py`; **gewijzigd**: `planner.py`, `store.py`, `app.py`, en de README. Voeg de nieuwe tests toe onder `tests/`.
-4. Laat de bestaande `DATABASE_URL` en Secrets ongewijzigd. Bij het eerste starten maakt SQLAlchemy automatisch de nieuwe tabel `swap_requests` aan (voor deze toevoeging is geen databasemigratie nodig).
-5. Gebruik **fictieve accounts en diensten**. Publiceer een actuele fictieve planning, log in als twee verschillende controleurs, dien een ruil in, laat de collega akkoord gaan, en log in als planner om goed te keuren.
-6. Controleer in beide individuele roosters dat de nieuwe versie zichtbaar is en in Historiek dat de goedkeuring is geregistreerd.
+1. **Maak eerst een echte back-up van je PostgreSQL-database en noteer de werkende v0.11-commit.** Stop bij fouten; maak nooit een nieuwe database aan om deze update uit te voeren.
+2. Download het ZIP-bestand van v0.12, pak het uit en upload de **inhoud** naar de hoofdmap van je private GitHub-repository. Het nieuwe bestand `months_v012.py` moet naast `app.py` en `store.py` staan.
+3. Laat je Streamlit Secrets (`DATABASE_URL` en accounts) ongewijzigd; voeg geen wachtwoorden toe aan GitHub. Controleer dat een eventueel gebruikte `ADMIN_RECOVERY_KEY` al verwijderd is.
+4. Herstart de Streamlit-app. Bij de **eerste start** maakt SQLAlchemy niet-destructief de tabellen `month_workspaces` en `shared_catalog` aan. De bestaande rij uit `workspace` wordt **gekopieerd** naar haar eigen maand. De oorspronkelijke `workspace`-rij en alle bestaande `planning_versions`, `accounts`, `leave_requests`, `swap_requests` en auditlogregels blijven intact.
+5. Controleer eerst de **oorspronkelijke maand**, met maandbehoefte, voorkeuren en gepubliceerde planning. Maak pas daarna een volgende maand aan.
 
-## Grenzen en beveiliging
+> **Let op:** `create_all` kan nieuwe tabellen aanmaken, maar is geen volwaardig migratieframework. Maak de back-up echt vóór de eerste opstart; herstel die bij een onverwachte fout in plaats van handmatig tabellen te verwijderen.
 
-- Per aanvraag worden twee reguliere dienstplaatsen **voor dezelfde planningsmaand** omgewisseld, niet een dienst overgenomen.
-- De originele planversie blijft staan, maar de workspace-revisie wordt verhoogd zodat oudere concepten niet opnieuw gepubliceerd kunnen worden; een ruil is alleen toegestaan als actuele werkruimte en gepubliceerde planversie identiek zijn aan het moment van indienen.
-- Een reeds toegewezen specifieke taak op een van de geruilde diensten verhindert de ruil. Geen impliciete taakverschuiving.
-- De solver krijgt maximaal 15 seconden om het volledige **vastgepinde** rooster te verifiëren. Bij timeout of ontbreken van een geldige oplossing wordt er niets gepubliceerd.
-- Deze workflow ondersteunt nog geen geavanceerde bevoegdheden per team en is geen goedgekeurde HR- of arbeidstijdapp. Gebruik geen echte gegevens.
-- Testaccounts hebben personeelsnummers die overeenkomen met het fictieve personeelsprofiel in het controleursbeheer.
+## Testplan met fictieve gegevens
 
-## Tests
+1. Selecteer de bestaande maand (bijvoorbeeld november). Controleer de ingevoerde diensten en bestaande gepubliceerde planning.
+2. Kies **Nieuwe maand voorbereiden**, selecteer december en klik op **Maand aanmaken**. De maand verschijnt als concept met lege dienstbehoefte. De controleurs en dienstcatalogus zijn wel aanwezig.
+3. Voer voor december enkele dienstnummers in onder **Maandbehoefte** en sla op. Laat een fictieve controleur een dagelijkse dienstwens voor december ingeven.
+4. Bereken een decemberconcept en publiceer het indien de solver een geschikte testplanning vindt.
+5. Schakel links terug naar november: de oorspronkelijke maandbehoefte en gepubliceerde rooster moeten onveranderd zichtbaar zijn. Schakel weer naar december: de nieuwe maandinvoer moet er nog staan.
+6. Test een verlofaanvraag voor december: goedkeuring mag alleen de decemberwerkruimte wijzigen.
+7. Voeg in testmodus een extra fictief dienstnummer toe en controleer dat de dienstcatalogus ook in de andere maanden bijgewerkt is. Oude **gepubliceerde** roosters worden niet herschreven.
 
-```
+## Belangrijke grenzen
+
+- De huidige planningsmotor controleert nog **niet** alle wettelijke/sectorale regels over maandgrenzen heen, bijvoorbeeld voor een nachtdienst op 30 november en een vroege dienst op 1 december. **Nog geen echte personeelsroosters publiceren voor gebruik.**
+- Algemene regelinstellingen en personeelsprofielen zijn bewust **gedeeld** in v0.12; een volledige versiehistoriek van individuele arbeidsregimes of ingangsdatums moet later worden toegevoegd.
+- Nieuwe maanden kopiëren **geen oude maandbehoefte**. De beheerder moet de nieuwe maandbehoefte importeren of invoeren.
+- Deze versie bevat geen automatische back-upimplementatie en geen productiebeveiligingsaudit. Gebruik alleen fictieve testgegevens, tot expliciete bedrijfs- en privacygoedkeuring.
+- Een eerdere publicatie blijft bewaard en kan nog bekeken worden, maar gewijzigde globale gegevens maken oudere concepten **verouderd**. Controleer voor elke publicatie de actuele invoer.
+
+## Lokale tests
+
+```bash
 python -m pip install -r requirements.txt
 python -m pip install pytest
 python -m pytest -q
 ```
 
-De echte solvervalidatie moet uitgevoerd worden in een omgeving waar OR-Tools geïnstalleerd is.
+De bestaande SQLAlchemy- en maandtests kunnen zonder OR-Tools draaien. Solvertests vragen een werkende OR-Tools-installatie en moeten op de uiteindelijke doelomgeving worden uitgevoerd.
