@@ -32,8 +32,9 @@ from dashboard_v014 import summarize_month, summarize_requests, dashboard_warnin
 from boundary_v015 import published_boundary_context, with_boundary_context
 from portal_v016 import (month_weeks, preference_summary, week_choices, save_week_choices,
                          personal_calendar, own_published_assignments, DAYS_NL, PRIORITIES)
+from portal_v017 import month_tiles, personal_publication_changes, personal_request_feed, WEEKDAYS as CALENDAR_DAYS
 
-st.set_page_config(page_title="Controleursplanning | v0.16", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.17", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -449,7 +450,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.16 • Persoonlijk week- en maandportaal • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.17 • Visuele maandkalender en aanvraagopvolging • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -488,9 +489,9 @@ with st.sidebar:
     st.caption("Niet gekoppeld aan systemen van De Lijn.")
 
 screens = (["Overzicht", "Controleurs", "Diensten", "Taken", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Weekend en maandgrenzen", "Planning", "Optimalisatie vergelijken"]
-           if is_manager else ["Mijn planning", "Mijn voorkeuren"])
+           if is_manager else ["Mijn planning", "Mijn voorkeuren", "Mijn aanvragen & wijzigingen"])
 if PERSISTENT:
-    screens += (["Verlofaanvragen beheren", "Ruilaanvragen beheren"] if is_manager else ["Mijn verlofaanvragen", "Mijn ruilaanvragen"])
+    screens += (["Verlofaanvragen beheren", "Ruilaanvragen beheren", "Roosterwijzigingen"] if is_manager else ["Mijn verlofaanvragen", "Mijn ruilaanvragen"])
 if PERSISTENT and current_user["role"] == "admin":
     screens += ["Accounts", "Historiek"]
 screen = st.radio("Onderdeel", screens, horizontal=True, label_visibility="collapsed")
@@ -1768,41 +1769,141 @@ elif screen == "Mijn planning":
     published = store.load_plan(engine, data["year"], data["month"], published_only=True)
     if not published:
         st.info("Voor deze maand is nog geen planning gepubliceerd. Je kunt je dienstwensen wel invullen bij **Mijn voorkeuren**.")
+        # De voorkeurenkalender is bruikbaar voordat er een officiële planning is.
+        weeks = month_tiles(data, eid, None)
+        view = "Weekkaarten"
+        changes = []
     else:
-        st.caption(f"Gepubliceerde testversie #{published['id']} · {data['month']:02d}/{data['year']}")
         if published["revision"] != st.session_state.workspace_revision:
             st.warning("De gepubliceerde planning kan verouderd zijn na wijzigingen of goedgekeurd verlof. "
                        "Vraag de planner naar de actuele stand.")
+        versions = store.personal_published_versions(engine, data["year"], data["month"], eid)
+        changes = (personal_publication_changes(versions[1]["assignments"], versions[0]["assignments"], eid)
+                   if len(versions) > 1 else [])
         own = own_published_assignments(published["payload"], eid)
-        assigned = [r for rows in own.values() for r in rows]
+        assigned = [r for day_rows in own.values() for r in day_rows]
         total_hours = round(sum(float(r.get("Uren", 0)) for r in assigned), 2)
-        a, b, c = st.columns(3)
-        a.metric("Ingeplande diensten/taken", len(assigned))
+        st.caption(f"Gepubliceerde testversie #{published['id']} · {data['month']:02d}/{data['year']}")
+        a, b, c, d = st.columns(4)
+        a.metric("Diensten/taken", len(assigned))
         b.metric("Geplande uren", f"{total_hours:g} u")
         c.metric("Dagen zonder toewijzing", len(days_in_month(data)) - len(own))
-        st.caption("Een dag zonder toewijzing is niet automatisch een formele rust- of verlofdag.")
-        rows = personal_calendar(data, eid, published["payload"])
-        st.markdown("#### Mijn maand in één overzicht")
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-        weeks = month_weeks(data)
-        selected_week = st.selectbox("Bekijk een week in detail", weeks,
-                                    format_func=lambda week: week["label"],
-                                    key=f"published_week_{eid}_{data['year']}_{data['month']}")
-        for day in selected_week["days"]:
-            iso = day.isoformat()
-            entry = next(row for row in rows if row["Datum"] == iso)
+        d.metric("Wijzigingen sinds vorige publicatie", len(changes))
+        st.caption("Een dag zonder dienst is niet automatisch een formele rust- of verlofdag.")
+        view = st.radio("Weergave", ["Maandkalender", "Weekkaarten", "Tabel"], horizontal=True,
+                        key=f"calendar_view_v017_{eid}_{data['year']}_{data['month']}")
+        leave_requests = store.list_leave_requests(engine, eid)
+        weeks = month_tiles(data, eid, published["payload"], leave_requests,
+                            {c["Datum"] for c in changes})
+
+    if view == "Maandkalender":
+        st.caption("🟢 Toegewezen dienst · 🟠 Gewijzigd sinds vorige publicatie · 🟣 Activiteit · 🏠 Vrijwens is geen goedgekeurd verlof")
+        columns = st.columns(7)
+        for col, name in zip(columns, CALENDAR_DAYS):
+            col.markdown(f"**{name}**")
+        for week in weeks:
+            columns = st.columns(7)
+            for col, tile in zip(columns, week):
+                with col:
+                    if not tile["in_month"]:
+                        st.caption(" ")
+                        continue
+                    with st.container(border=True):
+                        st.markdown(f"**{tile['day']:02d}**" + (" 🟠" if tile["changed"] else ""))
+                        if tile["category"] == "dienst":
+                            st.markdown("🟢 " + tile["primary"])
+                        elif tile["category"] == "activiteit":
+                            st.markdown("🟣 " + tile["primary"])
+                        else:
+                            st.caption(tile["primary"])
+                        for leave in tile["leave"]:
+                            st.caption(leave)
+                        if tile["wish"] != "Geen voorkeur":
+                            st.caption("Wens: " + tile["wish"])
+    elif view == "Weekkaarten":
+        selected_week = st.selectbox("Bekijk een week", range(len(weeks)),
+                                    format_func=lambda i: (f"Week {i + 1}: "
+                                                           f"{next(t['date'] for t in weeks[i] if t['in_month'])}"),
+                                    key=f"calendar_week_v017_{eid}_{data['year']}_{data['month']}")
+        for tile in weeks[selected_week]:
+            if not tile["in_month"]:
+                continue
             with st.container(border=True):
-                st.markdown(f"**{WEEKDAYS[day.weekday()]} {day:%d/%m/%Y}**")
-                st.write("**Gepubliceerd:** " + entry["Gepubliceerde planning"])
-                st.caption("Eigen wens: " + entry["Wens"])
-                if entry["Activiteit"] != "—":
-                    st.caption("Geregistreerde activiteit: " + entry["Activiteit"])
+                st.markdown(f"**{tile['weekday']} {tile['date']}**" + (" 🟠 Gewijzigd" if tile["changed"] else ""))
+                st.write(tile["primary"])
+                st.caption("Mijn voorkeur: " + tile["wish"])
+                if tile["leave"]:
+                    st.caption("Aanvragen: " + ", ".join(tile["leave"]))
+    else:
+        st.dataframe(pd.DataFrame(personal_calendar(data, eid, published["payload"] if published else None)),
+                     hide_index=True, use_container_width=True)
+
+    if published:
+        if len(versions) > 1:
+            with st.expander(f"Roosterwijzigingen sinds vorige publicatie ({len(changes)})"):
+                if changes:
+                    st.dataframe(pd.DataFrame(changes), use_container_width=True, hide_index=True)
+                else:
+                    st.success("Je diensttoewijzingen zijn niet veranderd sinds de vorige publicatie.")
+        else:
+            st.caption("Dit is de eerste gepubliceerde versie van deze maand.")
+        rows = personal_calendar(data, eid, published["payload"])
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             pd.DataFrame(rows).to_excel(writer, index=False, sheet_name="Mijn maand")
         st.download_button("⬇️ Mijn eigen maandrooster downloaden (Excel)", data=buffer.getvalue(),
                            file_name=f"mijn_planning_{data['year']}_{data['month']:02d}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+elif screen == "Mijn aanvragen & wijzigingen":
+    st.subheader("Mijn aanvragen en roosterwijzigingen")
+    eid = current_user["employee_id"]
+    leave = store.list_leave_requests(engine, eid)
+    swaps = store.list_swap_requests(engine, eid)
+    feed = personal_request_feed(leave, swaps, eid)
+    a, b = st.columns(2)
+    a.metric("Aanvragen in totaal", feed["total"])
+    b.metric("Nog in behandeling", feed["open"])
+    if feed["items"]:
+        st.dataframe(pd.DataFrame(feed["items"]), hide_index=True, use_container_width=True)
+    else:
+        st.info("Je hebt nog geen aanvragen ingediend of ontvangen.")
+    st.caption("Een aanvraag in behandeling is geen goedgekeurd verlof of uitgevoerde ruil. "
+               "Gebruik de bestaande onderdelen **Mijn verlofaanvragen** en **Mijn ruilaanvragen** om acties uit te voeren.")
+    versions = store.personal_published_versions(engine, data["year"], data["month"], eid)
+    if len(versions) >= 2:
+        changes = personal_publication_changes(versions[1]["assignments"], versions[0]["assignments"], eid)
+        st.markdown("#### Wijzigingen aan mijn gepubliceerde diensten")
+        if changes:
+            st.dataframe(pd.DataFrame(changes), use_container_width=True, hide_index=True)
+        else:
+            st.success("Geen wijzigingen aan jouw diensten tussen de laatste twee publicaties.")
+    elif versions:
+        st.info("Er is voor deze maand nog maar één gepubliceerde versie. Er zijn nog geen eerdere publicaties om mee te vergelijken.")
+    else:
+        st.info("Deze maand heeft nog geen gepubliceerde planning.")
+
+elif screen == "Roosterwijzigingen":
+    st.subheader("Gepubliceerde roosterwijzigingen")
+    st.caption("Vergelijk de laatste twee gepubliceerde versies. Concepten tellen niet mee.")
+    people = sorted(data["employees"], key=lambda e: (e.get("name", ""), e["id"]))
+    if people:
+        person_id = st.selectbox("Selecteer een controleur", [p["id"] for p in people],
+                                 format_func=lambda x: next(p["name"] for p in people if p["id"] == x),
+                                 key=f"changed_employee_v017_{data['year']}_{data['month']}")
+        versions = store.personal_published_versions(engine, data["year"], data["month"],
+                                                       current_user["employee_id"], person_id)
+        if len(versions) < 2:
+            st.info("Nog geen twee gepubliceerde versies voor deze maand beschikbaar.")
+        else:
+            changes = personal_publication_changes(versions[1]["assignments"], versions[0]["assignments"], person_id)
+            st.metric("Gewijzigde kalenderdagen", len(changes))
+            if changes:
+                st.dataframe(pd.DataFrame(changes), hide_index=True, use_container_width=True)
+            else:
+                st.success("Geen wijzigingen in de diensttoewijzingen van deze controleur.")
+    else:
+        st.info("Voeg eerst fictieve controleurs toe.")
 
 
 elif screen == "Accounts":

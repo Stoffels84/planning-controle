@@ -669,6 +669,43 @@ def load_plan(engine, year: int, month: int, published_only: bool = False) -> di
                 "published": bool(row.published_at), "author": row.author}
 
 
+
+def personal_published_versions(engine, year: int, month: int, actor: str,
+                                employee_id: str | None = None, limit: int = 2) -> list[dict]:
+    """Maximaal twee gepubliceerde versies, beveiligd per ingelogde gebruiker.
+
+    Controleurs kunnen uitsluitend hun eigen diensttoewijzingen opvragen. Een
+    planner/beheerder mag een specifieke controleur kiezen. Andere
+    persoonsgegevens en eventuele ruwe solvergegevens verlaten de DB niet.
+    """
+    if limit < 1 or limit > 2:
+        raise ValueError("Ongeldig aantal planningsversies.")
+    with session_factory(engine)() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active:
+            raise ValueError("Geen toegangsrechten.")
+        target = employee_id or actor
+        if who.role == "controleur" and target != actor:
+            raise ValueError("Controleurs kunnen alleen hun eigen planning bekijken.")
+        if who.role not in ("controleur", "admin", "planner"):
+            raise ValueError("Geen toegangsrechten.")
+        q = (select(PlanningVersion).where(
+            PlanningVersion.year == year, PlanningVersion.month == month,
+            PlanningVersion.published_at.is_not(None))
+            .order_by(PlanningVersion.published_at.desc(), PlanningVersion.id.desc())
+            .limit(limit))
+        result = []
+        for published in s.scalars(q).all():
+            payload = published.payload if isinstance(published.payload, dict) else {}
+            assignments = payload.get("assignments")
+            if not isinstance(assignments, list):
+                assignments = []
+            result.append({"id": published.id,
+                           "published_at": published.published_at.isoformat(),
+                           "assignments": [dict(r) for r in assignments
+                                           if isinstance(r, dict) and r.get("Personeelsnr") == target]})
+        return result
+
 def publish_plan(engine, plan_id: int, expected_revision: int, actor: str) -> None:
     with session_factory(engine).begin() as s:
         who = s.get(Account, actor)

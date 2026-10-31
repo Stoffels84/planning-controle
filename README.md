@@ -1,66 +1,61 @@
-# Controleursplanning v0.16 — persoonlijk portaal
+# Controleursplanning v0.17 — visuele kalender en aanvraagopvolging
 
-> **Proefversie: uitsluitend fictieve testgegevens.** Niet vrijgegeven voor echte persoonsgegevens of operationele personeelsplanning bij De Lijn. De toepasselijke arbeids- en privacyregels zijn nog niet volledig gevalideerd.
+> **Uitsluitend fictieve testgegevens.** Dit project is nog niet vrijgegeven voor echte personeelsgegevens of operationeel gebruik bij De Lijn. Arbeidsregels, privacy, hosting en back-ups moeten eerst formeel worden gevalideerd.
 
-## Nieuw in v0.16
+## Nieuw in versie 0.17
 
-Deze update verbetert vooral de gebruikerservaring. De bestaande Google OR-Tools-planningsmotor, database, accounts en maandenscheiding blijven behouden.
+**Persoonlijk kalenderoverzicht**
 
-### Mijn voorkeuren
+- In **Mijn planning** kan een controleur wisselen tussen **Maandkalender**, **Weekkaarten** en **Tabel**.
+- De kalender toont gepubliceerde diensten met concrete dienstnummers en uren. Wensen en geregistreerde activiteiten worden **afzonderlijk** weergegeven.
+- Aanvragen in behandeling worden als zodanig aangeduid. Een vrijwens en een verlofaanvraag zijn **geen goedgekeurd verlof**.
+- Op kleinere smartphones is **Weekkaarten** het overzichtelijkste alternatief voor de zevendelige maandkalender.
+- Een dag zonder dienst wordt bewust **niet** als formele rustdag bestempeld.
 
-- Controleurs kiezen **één week tegelijk** in plaats van een lang formulier met alle kalenderdagen.
-- Voor iedere datum zijn uitsluitend de **dienstnummers uit de maandbehoefte van die datum** beschikbaar, met begin- en einduur en dienstcategorie.
-- Alternatieven: **Liefst vrij** of **Geen voorkeur**.
-- Iedere wens kan de prioriteit laag, normaal of hoog krijgen.
-- Een week opslaan verandert **geen enkele andere week**, geen aanvullende voorkeuren en geen gegevens van collega's.
-- Het scherm toont het aantal dienstwensen, vrijwensen en dagen zonder voorkeur.
-- Bij reeds gepubliceerde plannen toont het formulier afzonderlijk de **gepubliceerde toewijzingen**. Een voorkeur wordt nooit als toegewezen dienst weergegeven.
-- Een geregistreerde afwezigheid/activiteit wordt zichtbaar gemeld; een wens verandert deze registratie niet.
-- Een afzonderlijk uitklapbaar maandoverzicht toont de gegevens van de controleur.
+**Mijn aanvragen & wijzigingen**
 
-### Mijn planning
+- Eén overzicht van eigen verlof- en ruilaanvragen, hun status en het aantal aanvragen dat nog in behandeling is.
+- Voor aanvragen goedkeuren, intrekken, accepteren of afwijzen blijven de bestaande schermen **Mijn verlofaanvragen** en **Mijn ruilaanvragen** beschikbaar.
+- Bij minstens twee gepubliceerde versies worden eigen wijzigingen per datum getoond, zoals `D201 → L301`, of van een dienst naar geen dienst. **Een conceptplanning telt niet mee.**
 
-- Een **persoonlijk maandoverzicht** met wens, gepubliceerde dienst en eventueel geregistreerde activiteit.
-- Een **weekkiezer** met één overzichtelijke kaart per kalenderdag.
-- Kenniscijfers voor diensttoewijzingen, uren en dagen zonder toegewezen dienst.
-- Excel-download van uitsluitend het **eigen** maandrooster.
-- De bestaande waarschuwing bij een mogelijk verouderde publicatie blijft behouden.
-- Een dag zonder geplande dienst betekent niet automatisch een formele rustdag.
+**Roosterwijzigingen voor planners en beheerders**
 
-### Beheerder
+- Nieuw read-only scherm **Roosterwijzigingen** voor de geselecteerde maand en de geselecteerde controleur.
+- De databaselaag voert een expliciete rolcontrole uit en geeft voor controleurs **uitsluitend eigen diensttoewijzingen** terug.
+- Wijzigingen worden vergeleken tussen de **twee recentste gepubliceerde** versies; niet tegen elke conceptwijziging.
+- Het scherm vergelijkt dienstnummers, begin- en eindtijd en uren, **niet** elke wijziging in taken, toelichtingen of urensaldi.
 
-- De beheerder behoudt de toegang tot het voorkeurenscherm per controleur, nu met dezelfde weekweergave.
-- Geen wijziging aan de hoofdbeheerderrechten, solver, maandbehoefte of database-indeling.
+**Geen databasemigratie nodig.** De bestaande tabellen en de OR-Tools-planningsmotor blijven ongewijzigd. Nieuwe code bevat alleen leesfuncties in `store.py`, een visuele datamodule en Streamlit-schermen.
 
-## Updaten vanaf v0.15
+## Update vanaf de werkende v0.16
 
-1. **Maak een back-up** van PostgreSQL en noteer of bewaar de laatste werkende GitHub-commit (`v0.15`).
-2. Pak het v0.16-ZIP-bestand uit. Upload de bestanden **naar de hoofdmap** van je bestaande privérepository, niet in een nieuwe submap.
-3. Vervang het bestaande `app.py` en voeg vooral `portal_v016.py` toe. Laat ook de overige meegeleverde projectbestanden in de update overeenkomen met dit ZIP-bestand.
-4. Laat je bestaande `.streamlit`-instellingen en Streamlit Secrets, in het bijzonder `DATABASE_URL`, ongewijzigd. **Er is geen databasemigratie nodig.**
-5. Laat Streamlit de app opnieuw uitrollen. Meld je aan met een fictief controleursaccount en open `Mijn voorkeuren`.
+1. **Maak vóór de update een PostgreSQL-back-up en bewaar je werkende GitHub-commit van v0.16.**
+2. Download `controleursplanning-github-streamlit-v017.zip`, pak het uit en upload de inhoud naar de **hoofdmap** van je bestaande privérepository, niet naar een submap.
+3. Vervang met name `app.py` en `store.py` en voeg het nieuwe bestand `portal_v017.py` toe. De meegeleverde overige bestanden horen bij dezelfde versie.
+4. Laat je `.streamlit`-instellingen en alle Streamlit Secrets, vooral `DATABASE_URL`, ongewijzigd. Voer **geen database-reset** uit.
+5. Open de Streamlit-app nadat de nieuwe commit uitgerold is en meld je aan met een **fictief controleursaccount**.
 
-## Testscenario op Streamlit
+## Online testen
 
-1. Open **november** en log in als fictieve controleur.
-2. Selecteer de eerste week, kies op een dag een concreet dienstnummer en op een andere dag `Liefst vrij`. Sla de week op.
-3. Wissel naar de tweede week, sla een andere wens op en ga terug naar de eerste week. De oorspronkelijke keuzes moeten behouden zijn.
-4. Laad de pagina opnieuw, meld je desnoods opnieuw aan en controleer of de keuzes nog bestaan.
-5. Log als beheerder in en publiceer een fictieve maandplanning. Open daarna als controleur `Mijn planning`: het **gepubliceerde dienstnummer** moet apart staan van de **gewenste dienst**.
-6. Download je eigen Excel-rooster. Controleer dat **geen collega's** worden opgenomen.
-7. Wissel naar december en terug: de novembervoorkeuren blijven behouden.
+1. Open een maand met een gepubliceerde planning en ga als controleur naar **Mijn planning**. Controleer of diensten in de maandkalender staan. Selecteer **Weekkaarten** en **Tabel**, en controleer of de gegevens gelijk zijn.
+2. Log in als controleur en bekijk **Mijn aanvragen & wijzigingen**. Controleer of eigen verlof- en ruilaanvragen zichtbaar zijn, maar die van collega's niet.
+3. Wijzig een testplanning en **publiceer** opnieuw via de bestaande, gecontroleerde publicatieworkflow. Vergelijk het wijzigingsoverzicht. Een nieuwe **conceptplanning zonder publicatie mag nog geen wijziging tonen**.
+4. Log in als planner. Open **Roosterwijzigingen**, selecteer dezelfde controleur en vergelijk met zijn persoonlijke wijzigingen.
+5. Wissel van maand en terug. De gegevens van de eerdere maand moeten ongewijzigd blijven.
+6. Test de app ook op een smartphone. Gebruik indien nodig **Weekkaarten** in plaats van de zeven kolommen.
 
-**Opgelet:** de keuze voor `Liefst vrij` is een zachte voorkeur, **geen verlofaanvraag**. Goedgekeurd verlof loopt via de afzonderlijke aanvraagfunctie.
+Bij maar één gepubliceerde planversie kan er geen vorige publicatie worden vergeleken. Dat is normaal.
 
-## Technische implementatie
+## Techniek en controles
 
-- `portal_v016.py`: zuivere datamodelhelpers voor weekindeling, telling, veilig opslaan van een deelweek, persoonlijke kalenderweergave en filtering van gepubliceerde toewijzingen op personeelsnummer.
-- `app.py`: vernieuwde Streamlit-weergave voor `Mijn voorkeuren`, `Voorkeuren` en `Mijn planning`.
-- `tests/test_v016_portal.py`: automatische tests voor verschillende maanden, dienstbeschikbaarheid per datum, behoud van wensen, persoonsisolatie en PostgreSQL-compatibele opslag via een lokale SQLite-testdatabase.
+- `portal_v017.py` bevat zuivere functies voor de kalender, statusweergave, eigen aanvraagoverzichten en dagvergelijkingen.
+- `store.personal_published_versions()` geeft maximaal twee **gepubliceerde** versies terug, met serverzijde gefilterde toewijzingen en toegangscontrole.
+- `app.py` toont de vernieuwde schermen; bestaande invoer-, goedkeurings- en planningscode blijft verder behouden.
+- `tests/test_v017_calendar.py` controleert kalenderdagen, geen datalekken, aanvraagstatussen, conceptuitsluiting, wijzigingen, rolrechten en databasefunctionaliteit.
 
-`pytest`-resultaat in deze ontwikkelomgeving: **106 geslaagde tests, 9 overgeslagen solver-testmodules**. Google OR-Tools en Streamlit zijn hier niet geïnstalleerd; de nieuwe interface en een volledige solverrun moeten nog op jouw Streamlit Community Cloud getest worden.
+**Offline testresultaat:** 111 tests geslaagd, 9 solver-testmodules overgeslagen (OR-Tools is niet geïnstalleerd in deze ontwikkelomgeving). De gebruikersinterface moet aanvullend op Streamlit Community Cloud getest worden.
 
-### Lokaal draaien
+Lokaal testen:
 
 ```bash
 python -m pip install -r requirements.txt
@@ -69,4 +64,4 @@ python -m pytest -q
 streamlit run app.py
 ```
 
-Gebruik voor de online proef uitsluitend fictieve gegevens. Publiceer nooit echte wachtwoorden of database-URL's in GitHub.
+De app mag nog steeds alleen met fictieve gegevens worden gebruikt totdat de toepasselijke arbeids- en privacyregels en hostinginfrastructuur goedgekeurd zijn.
