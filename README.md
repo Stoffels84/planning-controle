@@ -1,3 +1,17 @@
+# Controleursplanning v0.6.2 — foutcorrectie automatische planning
+
+**Bugfix:** In `planner.py` gebruikte de berekening van de weekend-eerlijkheid de variabele `needed` voordat deze werd gedefinieerd. Dat gaf een `UnboundLocalError`, die door het algemene foutbericht in de Streamlit-app niet zichtbaar werd. De eerdere planning kon intussen nog als `FEASIBLE` in beeld staan.
+
+**Installatie vanaf v0.6.1:** vervang uitsluitend `planner.py` in de hoofdmap van de bestaande GitHub-repository, klik **Commit changes** en laat Streamlit opnieuw uitrollen. Database, accounts, Secrets en `app.py` blijven ongewijzigd.
+
+**Controle:** Ga naar **Planning** en klik **Bereken maandplanning**. Als de berekening nu lukt, verschijnt een nieuwe planning met de actuele dienstbehoefte en zonder rode foutmelding. Controleer ook of er een nieuwe conceptversie wordt opgeslagen.
+
+**Veiligheid:** Maak vooraf een GitHub-herstelpunt; gebruik uitsluitend fictieve testgegevens. Voor een resterende fout: open Streamlit Community Cloud → de app → Manage app → Logs en deel uitsluitend de exception en relevante traceback, zonder secrets, namen of andere personeelsgegevens.
+
+**Tests:** Python-syntaxcontrole en regressietest voor deze specifieke fout. Integratietests met OR-Tools vereisen een omgeving waarin OR-Tools geïnstalleerd is.
+
+---
+
 # Controleursplanning v0.6.1 — uitsluitend fictieve testgegevens
 
 **Stack:** GitHub + Streamlit + Python + OR-Tools + PostgreSQL. Volledige voortzetting van v0.5, geen destructieve migratie. **Geen bedrijfsapplicatie**: het is een prototype, arbeidstijd- en sectorregels zijn niet juridisch gevalideerd.

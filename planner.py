@@ -101,6 +101,7 @@ def solve_month(data: dict) -> PlanResult:
     employees = [profile(e) for e in data["employees"] if e.get("active", True)]
     shifts = {s["id"]: s for s in data["shifts"]}
     slots = sorted([r for r in data["demand"] if r["required"] > 0], key=lambda r:(r["date"],r["shift_id"]))
+    needed = sum(r["required"] for r in slots)
     if not employees:
         return PlanResult("Geen beschikbare controleurs", [],
                           [{"Datum": r["date"], "Dienstnummer": r["shift_id"],
@@ -324,7 +325,6 @@ def solve_month(data: dict) -> PlanResult:
 
     # Groot genoeg voor lexicografische voorrang van dekking boven zachte scores.
     # Bovenbound voor de zachte wensen en abs-afwijkingen bij het maximaal aantal posten.
-    needed = sum(r["required"] for r in slots)
     pref_weight = int(settings["preference_weight"])
     fair_weight = int(settings["fairness_weight"])
     hours_weight = int(settings["hours_weight"])
