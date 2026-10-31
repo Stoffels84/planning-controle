@@ -1,6 +1,16 @@
-# Controleursplanning v0.6 — uitsluitend fictieve testgegevens
+# Controleursplanning v0.6.1 — uitsluitend fictieve testgegevens
 
 **Stack:** GitHub + Streamlit + Python + OR-Tools + PostgreSQL. Volledige voortzetting van v0.5, geen destructieve migratie. **Geen bedrijfsapplicatie**: het is een prototype, arbeidstijd- en sectorregels zijn niet juridisch gevalideerd.
+
+## Hotfix v0.6.1 — direct bewerkbare maximumvelden
+
+In het tabblad **Weekend en maandgrenzen** stonden de aan/uit-vinkjes en afhankelijke getalvelden in `st.form`-blokken. Streamlit verwerkt widgetwijzigingen binnen een formulier pas bij het indienen. Daardoor bleef `disabled=not ...` op de oude vinkjesstatus staan en waren de velden niet direct bewerkbaar.
+
+**Oplossing:** de twee betrokken formulieren zijn vervangen door reactieve `st.container(border=True)`-secties met afzonderlijke bewaarknoppen. De checkbox schakelt het bijbehorende getalveld voortaan onmiddellijk in of uit. De gegevens worden pas in PostgreSQL opgeslagen na het klikken op **Algemene grenzen bewaren** of **Individuele instellingen bewaren**.
+
+**Minimale installatie vanaf v0.6:** vervang alleen `app.py` in de hoofdmap van je GitHub-repository. Andere bestanden, Streamlit Secrets en de PostgreSQL-database blijven ongewijzigd. Bij een automatische Streamlit-herstart kan je de pagina opnieuw openen.
+
+**Controle:** open **Weekend en maandgrenzen**, vink **Persoonlijk maximum weekenddagen activeren** aan, wijzig de waarde bijvoorbeeld naar `2` en klik **Individuele instellingen bewaren**. Herhaal voor **maximum gewerkte weekends** en eventueel het algemene maximum. Vernieuw de pagina en controleer of de waarden bewaard bleven. Test uitsluitend met fictieve gegevens.
 
 ## Nieuw in v0.6
 

@@ -18,7 +18,7 @@ import store
 import catalog
 from policy_v06 import weekend_start_dates, hours_overview, service_overview
 
-st.set_page_config(page_title="Controleursplanning | v0.6", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.6.1", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -257,7 +257,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.6 • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.6.1 • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -716,7 +716,7 @@ elif screen == "Weekend en maandgrenzen":
     st.warning("Dit zijn configureerbare TESTREGELS, geen door De Lijn gevalideerde arbeidstijdregels. "
                "Historische weekenddagen en het startsaldo zijn handmatige testwaarden.")
     cfg = catalog.settings_with_defaults(data["settings"])
-    with st.form("global_v06"):
+    with st.container(border=True):
         st.markdown("#### Algemene harde maxima")
         st.caption("Voor maandcategorieën betekent 0: geen algemeen maximum. Per controleur kan een strenger maximum gelden.")
         global_cats = {}
@@ -733,7 +733,7 @@ elif screen == "Weekend en maandgrenzen":
                                  value=bool(cfg["use_opening_balance"]))
         st.caption("Als dit is ingeschakeld, vermindert een positief startsaldo de nog gewenste planuren. "
                    "Geen automatische verwerking in officiële loon- of urenregistratie.")
-        if st.form_submit_button("Algemene grenzen bewaren"):
+        if st.button("Algemene grenzen bewaren", key="save_global_v06"):
             new_state = clone()
             new_state["settings"].update({
                 "max_month_categories": {cat: int(v) for cat, v in global_cats.items() if v},
@@ -750,7 +750,7 @@ elif screen == "Weekend en maandgrenzen":
                                 key="v06_employee")
         person = catalog.profile(next(e for e in data["employees"] if e["id"] == selected))
         weekends = weekend_start_dates(data["year"], data["month"])
-        with st.form("individual_v06"):
+        with st.container(border=True):
             c1, c2 = st.columns(2)
             with c1:
                 limit_days = st.checkbox("Persoonlijk maximum weekenddagen activeren",
@@ -792,7 +792,7 @@ elif screen == "Weekend en maandgrenzen":
                             help="Geef een geheel getal tussen 0 en 31, of laat leeg.",
                             key="v06_target_"+selected+cat)
                     person_targets[cat] = raw.strip()
-            if st.form_submit_button("Individuele instellingen bewaren"):
+            if st.button("Individuele instellingen bewaren", key="save_individual_v06"):
                 try:
                     targets = {}
                     for cat, raw in person_targets.items():
