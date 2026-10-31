@@ -34,7 +34,7 @@ from portal_v016 import (month_weeks, preference_summary, week_choices, save_wee
                          personal_calendar, own_published_assignments, DAYS_NL, PRIORITIES)
 from portal_v017 import month_tiles, personal_publication_changes, personal_request_feed, WEEKDAYS as CALENDAR_DAYS
 
-st.set_page_config(page_title="Controleursplanning | v0.18", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.18.1", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -450,7 +450,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.17 • Visuele maandkalender en aanvraagopvolging • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.18.1 • Meldingen en veilige intrekking van goedgekeurd verlof • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -1626,6 +1626,41 @@ elif screen == "Mijn verlofaanvragen":
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
+    approved_requests = [r for r in requests if r["status"] == "approved"]
+    cancellation_rows = store.list_leave_cancellations(engine, eid)
+    pending_cancel_ids = {r["leave_request_id"] for r in cancellation_rows if r["status"] == "pending"}
+    cancellable = [r for r in approved_requests if r["id"] not in pending_cancel_ids]
+    st.markdown("#### Goedgekeurd verlof intrekken")
+    st.caption("Een goedgekeurd verlof kun je niet rechtstreeks verwijderen. Vraag een intrekking aan; "
+               "de beheerder of planner moet die eerst goedkeuren. Tot die tijd blijft het verlof geblokkeerd.")
+    if cancellable:
+        with st.form("leave_cancel_request_v0181"):
+            cancel_id = st.selectbox("Welk goedgekeurd verlof wil je intrekken?",
+                                     [r["id"] for r in cancellable],
+                                     format_func=lambda i: next(
+                                         f"#{r['id']} • {r['start_date']} t/m {r['end_date']}"
+                                         for r in cancellable if r["id"] == i))
+            reason = st.text_area("Reden voor de intrekking", max_chars=400,
+                                  placeholder="Bijvoorbeeld: mijn verlof is niet langer nodig")
+            if st.form_submit_button("Intrekking aanvragen"):
+                try:
+                    store.request_leave_cancellation(engine, cancel_id, eid, reason)
+                    st.session_state.leave_notice_v010 = "Intrekkingsverzoek verzonden naar de beheerder."
+                    st.rerun()
+                except (ValueError, store.ConflictError) as exc:
+                    st.error(str(exc))
+    elif approved_requests:
+        st.info("Voor je goedgekeurde verlof is al een intrekkingsverzoek ingediend.")
+    if cancellation_rows:
+        st.markdown("**Mijn intrekkingsverzoeken**")
+        cancel_status = {"pending": "In behandeling", "approved": "Goedgekeurd",
+                         "rejected": "Afgewezen"}
+        st.dataframe(pd.DataFrame([{
+            "Verzoek": r["id"], "Verlof": r["leave_request_id"],
+            "Van": r["start_date"], "Tot": r["end_date"],
+            "Status": cancel_status.get(r["status"], r["status"]),
+            "Beslist door": r["decided_by"] or "—"
+        } for r in cancellation_rows]), hide_index=True, use_container_width=True)
     if st.session_state.pop("leave_notice_v010", None):
         st.success("Je aanvraag is verwerkt. Controleer de status hierboven.")
 
@@ -1666,6 +1701,58 @@ elif screen == "Verlofaanvragen beheren":
             st.success("Geen openstaande aanvragen.")
     else:
         st.info("Er zijn nog geen aanvragen ingediend.")
+    st.markdown("#### Goedgekeurd verlof intrekken")
+    cancels = store.list_leave_cancellations(engine, current_user["employee_id"])
+    pending_cancels = [r for r in cancels if r["status"] == "pending"]
+    if pending_cancels:
+        st.dataframe(pd.DataFrame([{
+            "Verzoek": r["id"], "Verlof": r["leave_request_id"],
+            "Controleur": r["employee_id"], "Van": r["start_date"],
+            "Tot": r["end_date"], "Reden": r["reason"]
+        } for r in pending_cancels]), hide_index=True, use_container_width=True)
+        target_cancel = st.selectbox("Intrekkingsverzoek behandelen",
+                                      [r["id"] for r in pending_cancels],
+                                      format_func=lambda i: f"Intrekkingsverzoek #{i}")
+        left, right = st.columns(2)
+        if left.button("✅ Intrekking goedkeuren", key="approve_leave_cancel_v0181"):
+            try:
+                store.decide_leave_cancellation(engine, target_cancel, current_user["employee_id"], True)
+                st.session_state.leave_manager_notice_v010 = (
+                    "Verlofblokkering verwijderd. Controleer en publiceer de maandplanning opnieuw.")
+                st.rerun()
+            except (ValueError, store.ConflictError) as exc:
+                st.error(str(exc))
+        if right.button("Intrekking afwijzen", key="reject_leave_cancel_v0181"):
+            try:
+                store.decide_leave_cancellation(engine, target_cancel, current_user["employee_id"], False)
+                st.session_state.leave_manager_notice_v010 = "Intrekking afgewezen; het verlof blijft behouden."
+                st.rerun()
+            except (ValueError, store.ConflictError) as exc:
+                st.error(str(exc))
+    else:
+        st.caption("Geen intrekkingsverzoeken die op een beslissing wachten.")
+    st.markdown("**Rechtstreeks intrekken door beheerder/planner**")
+    st.caption("Gebruik dit uitsluitend wanneer de controleur de intrekking buiten de webapp gevraagd heeft. "
+               "De reden en je beslissing worden geregistreerd.")
+    approved_leave_rows = [r for r in rows if r["status"] == "approved"]
+    if approved_leave_rows:
+        with st.form("manager_revoke_leave_v0181"):
+            selected_leave = st.selectbox("Goedgekeurde verlofaanvraag",
+                                          [r["id"] for r in approved_leave_rows],
+                                          format_func=lambda i: next(
+                                              f"#{r['id']} • {r['employee_id']} • {r['start_date']} t/m {r['end_date']}"
+                                              for r in approved_leave_rows if r["id"] == i))
+            admin_reason = st.text_area("Reden / verwijzing naar verzoek controleur", max_chars=400)
+            confirm_cancel = st.checkbox("Ik bevestig dat de betrokken controleur om deze intrekking heeft gevraagd.")
+            if st.form_submit_button("Goedgekeurd verlof intrekken", disabled=not confirm_cancel):
+                try:
+                    store.revoke_approved_leave(engine, selected_leave,
+                                               current_user["employee_id"], admin_reason)
+                    st.session_state.leave_manager_notice_v010 = (
+                        "Verlof ingetrokken en blokkering verwijderd. Controleer en publiceer de maand opnieuw.")
+                    st.rerun()
+                except (ValueError, store.ConflictError) as exc:
+                    st.error(str(exc))
     info = st.session_state.pop("leave_manager_notice_v010", None)
     if info:
         st.success(info)

@@ -12,6 +12,7 @@ STATUS_LABELS = {
     'approved': 'Goedgekeurd',
     'rejected': 'Afgewezen',
     'withdrawn': 'Ingetrokken',
+    'cancelled': 'Goedgekeurd verlof ingetrokken',
 }
 
 

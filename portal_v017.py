@@ -15,6 +15,7 @@ WEEKDAYS = ("Ma", "Di", "Wo", "Do", "Vr", "Za", "Zo")
 LEAVE_STATUS = {
     "pending": "In behandeling", "approved": "Goedgekeurd",
     "rejected": "Afgewezen", "withdrawn": "Ingetrokken",
+    "cancelled": "Goedgekeurd verlof ingetrokken",
 }
 SWAP_STATUS = {
     "pending": "Wacht op collega", "accepted": "Wacht op planner",

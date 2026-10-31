@@ -103,6 +103,19 @@ class LeaveRequest(Base):
     hours_per_day: Mapped[float | None] = mapped_column(nullable=True)
 
 
+class LeaveCancellation(Base):
+    """Intrekkingsverzoek voor reeds goedgekeurd verlof; behoudt de beslissingshistoriek."""
+    __tablename__ = "leave_cancellations"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    leave_request_id: Mapped[int] = mapped_column(Integer, ForeignKey("leave_requests.id"), nullable=False, index=True)
+    requested_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str] = mapped_column(String(400), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by: Mapped[str | None] = mapped_column(String(64))
+
+
 class SwapRequest(Base):
     """Een ruilvoorstel gekoppeld aan exact één gepubliceerde planversie."""
     __tablename__ = "swap_requests"
@@ -994,6 +1007,160 @@ def decide_leave_request(engine, request_id: int, actor: str, approve: bool,
                 + ("goedgekeurd" if approve else "afgewezen") + ".")
         _audit(s, actor, f"Verlofaanvraag #{row.id} {row.status} door {actor}")
         return {"id": row.id, "status": row.status, "workspace_revision": w.revision}
+
+
+# v0.18.1 — Intrekken van reeds goedgekeurd verlof, met toestemming en historiek.
+
+def _cancellation_dict(row: LeaveCancellation) -> dict:
+    return {"id": row.id, "leave_request_id": row.leave_request_id,
+            "requested_by": row.requested_by, "reason": row.reason,
+            "status": row.status, "created_at": row.created_at.isoformat(),
+            "decided_at": row.decided_at.isoformat() if row.decided_at else None,
+            "decided_by": row.decided_by}
+
+
+def list_leave_cancellations(engine, actor: str) -> list[dict]:
+    """Een controleur ziet alleen de intrekkingen van eigen verlof."""
+    with session_factory(engine)() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active:
+            raise ValueError("Geen toegangsrechten.")
+        q = select(LeaveCancellation, LeaveRequest).join(
+            LeaveRequest, LeaveCancellation.leave_request_id == LeaveRequest.id)
+        if who.role == "controleur":
+            q = q.where(LeaveRequest.employee_id == actor)
+        elif who.role not in ("admin", "planner"):
+            raise ValueError("Geen toegangsrechten.")
+        q = q.order_by(LeaveCancellation.id.desc())
+        return [{**_cancellation_dict(cancel),
+                 "employee_id": leave.employee_id,
+                 "start_date": leave.start_date.isoformat(),
+                 "end_date": leave.end_date.isoformat()}
+                for cancel, leave in s.execute(q).all()]
+
+
+def _validate_cancel_reason(reason: str) -> str:
+    reason = str(reason or "").strip()
+    if not 5 <= len(reason) <= 400:
+        raise ValueError("Vermeld een korte reden (5 tot 400 tekens).")
+    return reason
+
+
+def request_leave_cancellation(engine, request_id: int, actor: str, reason: str) -> int:
+    """Aanvrager vraagt intrekking; goedgekeurd verlof blijft intussen geblokkeerd."""
+    reason = _validate_cancel_reason(reason)
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        leave = s.scalar(select(LeaveRequest).where(LeaveRequest.id == request_id).with_for_update())
+        if not who or not who.active or who.role != "controleur" or not leave or leave.employee_id != actor:
+            raise ValueError("Alleen de betrokken controleur kan een intrekking aanvragen.")
+        if leave.status != "approved":
+            raise ValueError("Alleen goedgekeurd verlof kan via dit verzoek worden ingetrokken.")
+        pending = s.scalar(select(LeaveCancellation.id).where(
+            LeaveCancellation.leave_request_id == request_id,
+            LeaveCancellation.status == "pending").limit(1))
+        if pending:
+            raise ValueError("Voor dit verlof bestaat al een intrekkingsverzoek.")
+        row = LeaveCancellation(leave_request_id=request_id, requested_by=actor,
+                                reason=reason, status="pending", created_at=now())
+        s.add(row)
+        s.flush()
+        _notify_managers(s, f"leave-cancel-pending:{row.id}", "Verzoek om verlof in te trekken",
+                         f"Intrekkingsverzoek #{row.id} voor goedgekeurd verlof #{request_id} wacht op beslissing.")
+        _audit(s, actor, f"Intrekking van goedgekeurd verlof #{request_id} aangevraagd (verzoek #{row.id})")
+        return row.id
+
+
+def _apply_approved_leave_cancellation(s, leave: LeaveRequest, actor: str) -> int:
+    """Wijzig alleen de bij deze goedkeuring geschreven testcredits, in dezelfde transactie."""
+    w = _period_workspace(s, leave.start_date.year, leave.start_date.month)
+    if w is None:
+        raise ValueError("De bijbehorende maandplanning bestaat niet meer.")
+    if leave.status != "approved":
+        raise ValueError("Het verlof is niet langer goedgekeurd.")
+    state = deepcopy(w.payload)
+    credits = state.get("hour_credits", [])
+    if not isinstance(credits, list):
+        raise ValueError("De afwezigheden van deze maand zijn ongeldig.")
+    expected = [absence_credit(leave.employee_id, day, float(leave.hours_per_day))
+                for day in leave_days(leave.start_date, leave.end_date,
+                                      leave.start_date.year, leave.start_date.month)]
+    # Test volledig vóór verwijderen, om gedeeltelijke wijzigingen te voorkomen.
+    available = deepcopy(credits)
+    for entry in expected:
+        if entry not in available:
+            raise ValueError("De goedgekeurde verlofregistratie is gewijzigd. Controleer eerst de activiteiten.")
+        available.remove(entry)
+    state["hour_credits"] = available
+    w.payload = state
+    w.revision += 1
+    leave.status = "cancelled"
+    _audit(s, actor, f"Goedgekeurd verlof #{leave.id} ingetrokken; maandrevisie {w.revision}")
+    return w.revision
+
+
+def decide_leave_cancellation(engine, cancellation_id: int, actor: str, approve: bool) -> dict:
+    """Planner/administrator beslist. Bij goedkeuring vervalt de blokkering, niet de publicatie."""
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Alleen beheerders of planners mogen beslissen.")
+        request = s.scalar(select(LeaveCancellation).where(
+            LeaveCancellation.id == cancellation_id).with_for_update())
+        if not request or request.status != "pending":
+            raise ValueError("Dit intrekkingsverzoek is niet meer in behandeling.")
+        leave = s.scalar(select(LeaveRequest).where(
+            LeaveRequest.id == request.leave_request_id).with_for_update())
+        if not leave or leave.status != "approved":
+            raise ValueError("Dit verlof is niet meer goedgekeurd.")
+        revision = None
+        if approve:
+            revision = _apply_approved_leave_cancellation(s, leave, actor)
+        request.status = "approved" if approve else "rejected"
+        request.decided_at = now()
+        request.decided_by = actor
+        _notice(s, leave.employee_id, f"leave-cancel-decision:{request.id}",
+                "Beslissing intrekking verlof",
+                f"Je verzoek om verlof #{leave.id} in te trekken is "
+                + ("goedgekeurd. Een reeds gepubliceerd rooster wordt niet automatisch gewijzigd."
+                   if approve else "afgewezen. Het goedgekeurde verlof blijft behouden."))
+        _audit(s, actor, f"Intrekkingsverzoek #{request.id} voor verlof #{leave.id} "
+               + ("goedgekeurd" if approve else "afgewezen"))
+        return {"id": request.id, "status": request.status, "workspace_revision": revision}
+
+
+def revoke_approved_leave(engine, request_id: int, actor: str, reason: str) -> dict:
+    """Beheerder trekt na extern verzoek zelf in; reden en beslissing worden opgeslagen."""
+    reason = _validate_cancel_reason(reason)
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Alleen beheerders of planners mogen verlof intrekken.")
+        leave = s.scalar(select(LeaveRequest).where(LeaveRequest.id == request_id).with_for_update())
+        if not leave or leave.status != "approved":
+            raise ValueError("Alleen goedgekeurd verlof kan ingetrokken worden.")
+        pending = s.scalar(select(LeaveCancellation).where(
+            LeaveCancellation.leave_request_id == request_id,
+            LeaveCancellation.status == "pending").with_for_update())
+        if pending:
+            # Een bestaand verzoek behandelen i.p.v. een tweede open verzoek maken.
+            request = pending
+        else:
+            request = LeaveCancellation(leave_request_id=request_id,
+                                        requested_by=actor, reason=reason,
+                                        status="pending", created_at=now())
+            s.add(request)
+            s.flush()
+        revision = _apply_approved_leave_cancellation(s, leave, actor)
+        request.status = "approved"
+        request.decided_at = now()
+        request.decided_by = actor
+        _notice(s, leave.employee_id, f"leave-cancel-decision:{request.id}",
+                "Goedgekeurd verlof ingetrokken",
+                f"Je goedgekeurde verlof #{leave.id} werd door de beheerder ingetrokken. "
+                "Een reeds gepubliceerd rooster blijft ongewijzigd tot een nieuwe publicatie.")
+        _audit(s, actor, f"Rechtstreekse intrekking verlof #{leave.id}: {reason[:80]}")
+        return {"id": request.id, "status": request.status, "workspace_revision": revision}
 
 
 # v0.11 — Onderlinge dienstwissels, enkel met fictieve gegevens.
