@@ -30,8 +30,10 @@ from swap_v011 import regular_assignments
 from month_copy_v013 import copy_month_demand_rows
 from dashboard_v014 import summarize_month, summarize_requests, dashboard_warnings, dashboard_counts
 from boundary_v015 import published_boundary_context, with_boundary_context
+from portal_v016 import (month_weeks, preference_summary, week_choices, save_week_choices,
+                         personal_calendar, own_published_assignments, DAYS_NL, PRIORITIES)
 
-st.set_page_config(page_title="Controleursplanning | v0.15", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.16", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -208,83 +210,87 @@ def to_iso(value) -> str:
 
 
 def render_daily_preferences(eid: str, scope: str) -> None:
-    """Per kalenderdag kiezen uit de dienstnummers die die dag ingepland staan.
-
-    Bewaart alle dagkeuzes met één databasebewerking (optimistic locking).
-    Geen kalenderdiensten buiten de actuele maandbehoefte aanbieden.
-    """
+    """Mobielvriendelijk: één week tegelijk invullen, alle andere weken behouden."""
     data = st.session_state.project_data
+    weeks = month_weeks(data)
     available = shifts_by_day(data)
     old = current_daily_choices(data, eid)
-    dates = days_in_month(data)
-    st.markdown("### Mijn dienstwensen per dag")
-    st.caption("Kies per dag een **dienstnummer** uit de maandbehoefte. "
-               "Geen voorkeur of liever vrij kan ook. Dit zijn wensen, geen gegarandeerde toewijzingen.")
-    stale = [p for day, p in old.items()
-             if preference_type(p) == "daily_shift" and
-             p.get("shift_id") not in {sh["id"] for sh in available.get(day, [])}]
-    if stale:
-        st.warning("Eén of meer eerder gekozen diensten staan niet langer op de maandbehoefte. "
-                   "Kies opnieuw en sla het overzicht op om deze oude wensen te vervangen.")
-
+    published_view = (store.load_plan(engine, data["year"], data["month"], published_only=True)
+                      if PERSISTENT else None)
+    published_by_date = own_published_assignments(published_view["payload"], eid) if published_view else {}
+    counts = preference_summary(data, eid)
+    st.markdown("### Dienstwensen per week")
+    st.caption("Selecteer per dag een **concreet dienstnummer** uit de maandbehoefte, "
+               "of kies **Liefst vrij**. Een wens is geen gegarandeerde toewijzing of goedgekeurd verlof.")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Dienstwensen", counts["shift"])
+    c2.metric("Liefst vrij", counts["free"])
+    c3.metric("Geen voorkeur", counts["unselected"])
+    visible = st.selectbox("Week bewerken", weeks, format_func=lambda w: w["label"],
+                           key=f"portal_week_{scope}_{eid}_{data['year']}_{data['month']}")
+    days = visible["days"]
     pending = {}
-    with st.form(f"daily_preference_form_{scope}_{eid}_{data['year']}_{data['month']}"):
-        grouped = [(key, list(items)) for key, items in groupby(
-            dates, key=lambda d: (d.isocalendar().year, d.isocalendar().week))]
-        for week_number, ((_, week), items) in enumerate(grouped):
-            with st.expander(f"Week {week} · {items[0]:%d/%m} – {items[-1]:%d/%m}",
-                             expanded=week_number == 0):
-                for day in items:
-                    iso = day.isoformat()
-                    shifts = available.get(iso, [])
-                    # Tuples voorkomen een botsing met echte dienstnummers.
-                    options = [("none", ""), ("free", "")] + [("shift", sh["id"]) for sh in shifts]
-                    entry = old.get(iso, {})
-                    kind = preference_type(entry) if entry else ""
-                    wanted = (("shift", entry["shift_id"]) if kind == "daily_shift"
-                              else ("free", "") if kind == "free_day" else ("none", ""))
-                    if wanted not in options:
-                        wanted = ("none", "")
-                    by_id = {sh["id"]: sh for sh in shifts}
-                    def display(value, lookup=by_id):
-                        typ, sid = value
-                        if typ == "none":
-                            return "Geen voorkeur"
-                        if typ == "free":
-                            return "Liefst vrij"
-                        shift = lookup[sid]
-                        return f"{sid} · {shift['start']}–{shift['end']}"
-
-                    c_day, c_shift, c_priority = st.columns([1.35, 3, 1.25])
-                    with c_day:
-                        st.markdown(f"**{WEEKDAYS[day.weekday()]}**  ")
-                        st.caption(f"{day:%d/%m/%Y}")
-                    with c_shift:
-                        selected = st.selectbox(
-                            f"Dienstwens voor {iso}", options,
-                            index=options.index(wanted), format_func=display,
-                            label_visibility="collapsed", key=f"daily_choice_{scope}_{eid}_{iso}")
-                        if not shifts:
-                            st.caption("Geen diensten in maandbehoefte")
-                    with c_priority:
-                        priority = st.selectbox(
-                            f"Prioriteit {iso}", [1, 2, 3],
-                            index=int(entry.get("priority", 2)) - 1,
-                            format_func=lambda v: {1: "Laag", 2: "Normaal", 3: "Hoog"}[v],
-                            label_visibility="collapsed", key=f"daily_priority_{scope}_{eid}_{iso}")
-                    pending[iso] = {"kind": selected[0], "shift_id": selected[1],
-                                    "priority": priority}
-        submitted = st.form_submit_button("💾 Alle dienstwensen voor deze maand opslaan")
+    with st.form(f"portal_week_form_{scope}_{eid}_{data['year']}_{data['month']}_{visible['key']}"):
+        for day in days:
+            iso = day.isoformat()
+            with st.container(border=True):
+                st.markdown(f"**{WEEKDAYS[day.weekday()]} {day:%d/%m/%Y}**")
+                if published_view:
+                    today_published = published_by_date.get(iso, [])
+                    st.caption("Gepubliceerd: " + (
+                        ", ".join(str(r["Dienstnummer"]) + " · " + str(r.get("Begin", ""))
+                                  + "–" + str(r.get("Einde", "")) for r in today_published)
+                        if today_published else "Geen dienst toegewezen"))
+                shifts = available.get(iso, [])
+                by_id = {sh["id"]: sh for sh in shifts}
+                options = [("none", ""), ("free", "")] + [("shift", sh["id"]) for sh in shifts]
+                pref = old.get(iso, {})
+                kind = preference_type(pref) if pref else ""
+                wanted = (("shift", pref.get("shift_id", "")) if kind == "daily_shift"
+                          else ("free", "") if kind == "free_day" else ("none", ""))
+                if wanted not in options:
+                    st.warning("De eerder gekozen dienst is niet meer beschikbaar. Kies een nieuwe dienst.")
+                    wanted = ("none", "")
+                def display(option, lookup=by_id):
+                    typ, sid = option
+                    if typ == "none":
+                        return "— Geen voorkeur"
+                    if typ == "free":
+                        return "🏡 Liefst vrij"
+                    shift = lookup[sid]
+                    return f"{sid} · {shift['start']}–{shift['end']} · {shift['category']}"
+                selected = st.selectbox("Gewenste dienst", options, index=options.index(wanted),
+                                        format_func=display, key=f"daily_choice_{scope}_{eid}_{iso}")
+                priority = st.selectbox("Belang van deze wens", [1, 2, 3],
+                                         index=int(pref.get("priority", 2)) - 1,
+                                         format_func=lambda value: PRIORITIES[value],
+                                         key=f"daily_priority_{scope}_{eid}_{iso}")
+                pending[iso] = {"kind": selected[0], "shift_id": selected[1], "priority": priority}
+                if not shifts:
+                    st.caption("Er staan vandaag geen diensten in de maandbehoefte. 'Liefst vrij' kan wel.")
+                credits = [c for c in data.get("hour_credits", [])
+                           if c.get("employee_id") == eid and c.get("date") == iso]
+                if credits:
+                    st.info("Er is een afwezigheid of activiteit geregistreerd op deze datum. "
+                            "Een dienstwens heft deze registratie niet op.")
+        submitted = st.form_submit_button("💾 Wensen voor deze week opslaan", use_container_width=True)
     if submitted:
         try:
-            updated = update_daily_choices(data, eid, pending)
+            updated = save_week_choices(data, eid, days, pending)
         except ValueError as error:
             st.error(str(error))
         else:
-            st.session_state[f"daily_saved_{scope}_{eid}"] = True
+            st.session_state[f"week_saved_{scope}_{eid}_{visible['key']}"] = True
             replace_and_rerun(updated)
-    if st.session_state.pop(f"daily_saved_{scope}_{eid}", False):
-        st.success("Je dienstwensen per datum zijn opgeslagen.")
+    if st.session_state.pop(f"week_saved_{scope}_{eid}_{visible['key']}", False):
+        st.success("De wensen van deze week zijn opgeslagen. Andere weken bleven ongewijzigd.")
+    st.caption("Je kunt een andere week kiezen en die afzonderlijk bewaren. "
+               "Niets wordt automatisch als verlofaanvraag ingediend.")
+    with st.expander("Mijn volledige maandoverzicht bekijken"):
+        if published_view and published_view["revision"] != st.session_state.workspace_revision:
+            st.warning("De gepubliceerde planning kan verouderd zijn na wijzigingen in de invoer.")
+        st.dataframe(pd.DataFrame(personal_calendar(data, eid, published_view["payload"] if published_view else None)), hide_index=True,
+                     use_container_width=True, column_config={"Datum": "Datum", "Wens": "Voorkeur"})
 
 
 def render_preferences(eid: str, scope: str) -> None:
@@ -443,7 +449,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.15 • Maandgrenscontrole • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.16 • Persoonlijk week- en maandportaal • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -1758,19 +1764,46 @@ elif screen == "Mijn voorkeuren":
 
 elif screen == "Mijn planning":
     st.subheader("Mijn gepubliceerde maandplanning")
+    eid = current_user["employee_id"]
     published = store.load_plan(engine, data["year"], data["month"], published_only=True)
     if not published:
-        st.info("Er is nog geen testplanning voor deze maand gepubliceerd.")
+        st.info("Voor deze maand is nog geen planning gepubliceerd. Je kunt je dienstwensen wel invullen bij **Mijn voorkeuren**.")
     else:
-        eid = current_user["employee_id"]
-        own = [a for a in published["payload"]["assignments"] if a["Personeelsnr"] == eid]
-        st.caption(f"Gepubliceerde testversie #{published['id']} • {data['month']:02d}/{data['year']}")
+        st.caption(f"Gepubliceerde testversie #{published['id']} · {data['month']:02d}/{data['year']}")
         if published["revision"] != st.session_state.workspace_revision:
-            st.warning("Let op: de gepubliceerde planning kan verouderd zijn na gewijzigde planningsgegevens of goedgekeurd verlof. Vraag de planner naar de actuele stand.")
-        st.dataframe(pd.DataFrame(own, columns=["Datum", "Dienstnummer", "Categorie", "Begin", "Einde", "Beginlocatie", "Eindlocatie", "Uren"]),
-                     hide_index=True, use_container_width=True)
-        if not own:
-            st.info("Voor deze maand zijn nog geen diensten aan jouw testaccount toegewezen.")
+            st.warning("De gepubliceerde planning kan verouderd zijn na wijzigingen of goedgekeurd verlof. "
+                       "Vraag de planner naar de actuele stand.")
+        own = own_published_assignments(published["payload"], eid)
+        assigned = [r for rows in own.values() for r in rows]
+        total_hours = round(sum(float(r.get("Uren", 0)) for r in assigned), 2)
+        a, b, c = st.columns(3)
+        a.metric("Ingeplande diensten/taken", len(assigned))
+        b.metric("Geplande uren", f"{total_hours:g} u")
+        c.metric("Dagen zonder toewijzing", len(days_in_month(data)) - len(own))
+        st.caption("Een dag zonder toewijzing is niet automatisch een formele rust- of verlofdag.")
+        rows = personal_calendar(data, eid, published["payload"])
+        st.markdown("#### Mijn maand in één overzicht")
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        weeks = month_weeks(data)
+        selected_week = st.selectbox("Bekijk een week in detail", weeks,
+                                    format_func=lambda week: week["label"],
+                                    key=f"published_week_{eid}_{data['year']}_{data['month']}")
+        for day in selected_week["days"]:
+            iso = day.isoformat()
+            entry = next(row for row in rows if row["Datum"] == iso)
+            with st.container(border=True):
+                st.markdown(f"**{WEEKDAYS[day.weekday()]} {day:%d/%m/%Y}**")
+                st.write("**Gepubliceerd:** " + entry["Gepubliceerde planning"])
+                st.caption("Eigen wens: " + entry["Wens"])
+                if entry["Activiteit"] != "—":
+                    st.caption("Geregistreerde activiteit: " + entry["Activiteit"])
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            pd.DataFrame(rows).to_excel(writer, index=False, sheet_name="Mijn maand")
+        st.download_button("⬇️ Mijn eigen maandrooster downloaden (Excel)", data=buffer.getvalue(),
+                           file_name=f"mijn_planning_{data['year']}_{data['month']:02d}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 elif screen == "Accounts":
     st.subheader("Accounts beheren — alleen hoofdbeheerder")
