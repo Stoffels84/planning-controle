@@ -5,6 +5,7 @@ Geen echte personeelsgegevens gebruiken op gratis Community Cloud zonder goedkeu
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from copy import deepcopy
 import hashlib
 import hmac
 from typing import Any
@@ -17,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 
 from demo_data import build_demo
 from months_v012 import period_key, shared_fields, merge_shared, new_month_payload
+from month_copy_v013 import copy_month_demand_rows
 from requests_v010 import leave_days, absence_credit
 from swap_v011 import make_swap_plan, verify_swap_with_solver
 
@@ -249,7 +251,14 @@ def list_month_workspaces(engine) -> list[dict]:
         return summaries
 
 
-def create_month_workspace(engine, year: int, month: int, actor: str) -> None:
+def create_month_workspace(engine, year: int, month: int, actor: str,
+                           source_period: tuple[int, int] | None = None,
+                           copy_mode: str = "weekday") -> None:
+    """Nieuwe maand, eventueel met alleen de behoefte uit een bestaande maand.
+
+    De volledige creatie gebeurt in één transactie; bij ongeldige diensten of
+    datums wordt noch de nieuwe maand noch de bron gewijzigd.
+    """
     period = period_key(year, month)
     initialize_months(engine)
     with session_factory(engine).begin() as s:
@@ -259,13 +268,66 @@ def create_month_workspace(engine, year: int, month: int, actor: str) -> None:
         shared = s.scalar(select(SharedCatalog).where(SharedCatalog.id == 1).with_for_update())
         if s.get(MonthWorkspace, period):
             raise ValueError("Deze maand bestaat al. Selecteer ze in het overzicht.")
-        # Basis = gedeelde mastergegevens + lege maandvelden. Geen automatische
-        # kopie van de dienstbehoefte of persoonsgebonden wensen/verlof.
         legacy = s.get(Workspace, 1)
         template = merge_shared(legacy.payload, shared.payload)
         state = new_month_payload(year, month, template)
+        if source_period is not None:
+            if len(source_period) != 2:
+                raise ValueError("Ongeldige bronmaand.")
+            src = s.get(MonthWorkspace, period_key(*source_period))
+            if src is None:
+                raise ValueError("De bronmaand bestaat niet.")
+            state["demand"] = copy_month_demand_rows(
+                src.payload, year, month, shared.payload.get("shifts", []), copy_mode
+            )
         s.add(MonthWorkspace(period=period, payload=state, revision=1))
-        _audit(s, actor, f"Nieuwe maand {year}-{month:02d} aangemaakt")
+        _audit(s, actor, f"Nieuwe maand {year}-{month:02d} aangemaakt" +
+               (f"; behoefte gekopieerd van {source_period[0]}-{source_period[1]:02d} ({copy_mode})"
+                if source_period else ""))
+
+
+def copy_month_workspace_demand(engine, source_year: int, source_month: int,
+                                target_year: int, target_month: int,
+                                expected_revision: int, actor: str,
+                                mode: str = "weekday") -> int:
+    """Vul een reeds aangemaakte, LEEG gebleven doelmaand vanuit een bronmaand.
+
+    Wijzigingen zijn atomair, met revision lock; nooit automatisch bestaande
+    maandbehoefte of een reeds gepubliceerde planning overschrijven.
+    """
+    source_key, target_key = period_key(source_year, source_month), period_key(target_year, target_month)
+    initialize_months(engine)
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Alleen beheerders en planners kunnen maandbehoeften kopiëren.")
+        shared = s.scalar(select(SharedCatalog).where(SharedCatalog.id == 1).with_for_update())
+        source = s.get(MonthWorkspace, source_key)
+        target = s.scalar(select(MonthWorkspace).where(MonthWorkspace.period == target_key).with_for_update())
+        if source is None or target is None:
+            raise ValueError("Bron- of doelmaand bestaat niet.")
+        if target.revision != expected_revision:
+            raise ConflictError("De doelmaand is ondertussen veranderd. Vernieuw eerst de pagina.")
+        if target.payload.get("demand"):
+            raise ValueError("Deze maand heeft al dienstbehoefte. Kopiëren is alleen toegestaan naar een lege maand.")
+        publication = s.scalar(select(PlanningVersion.id).where(
+            PlanningVersion.year == target_year, PlanningVersion.month == target_month,
+            PlanningVersion.published_at.is_not(None)).limit(1))
+        if publication is not None:
+            raise ValueError("Voor deze maand is al een planning gepubliceerd. Kopiëren is geblokkeerd.")
+        if shared is None:
+            raise SetupError("Gedeelde dienstcatalogus ontbreekt.")
+        demand = copy_month_demand_rows(source.payload, target_year, target_month,
+                                        shared.payload.get("shifts", []), mode)
+        if not demand:
+            raise ValueError("Deze kopie zou leeg zijn. Kies een andere bronmaand of methode.")
+        state = dict(target.payload)
+        state["demand"] = demand
+        target.payload = state
+        target.revision += 1
+        _audit(s, actor, f"Maandbehoefte gekopieerd {source_year}-{source_month:02d} naar "
+               f"{target_year}-{target_month:02d} ({mode})")
+        return target.revision
 
 
 def load_month_workspace(engine, year: int, month: int) -> tuple[dict, int]:

@@ -26,8 +26,9 @@ from optimization_v09 import (WEIGHT_KEYS, DEFAULTS, options_for, with_profile,
 from daily_v091 import days_in_month, shifts_by_day, current_daily_choices, update_daily_choices
 from requests_v010 import STATUS_LABELS
 from swap_v011 import regular_assignments
+from month_copy_v013 import copy_month_demand_rows
 
-st.set_page_config(page_title="Controleursplanning | v0.12", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.13", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -384,12 +385,33 @@ if PERSISTENT:
                 next_month = 1 if selected_period[1] == 12 else selected_period[1] + 1
                 new_period_date = st.date_input("Nieuwe kalendermaand", date(next_year, next_month, 1),
                                                 format="DD/MM/YYYY")
-                if st.button("Maand aanmaken", key="create_month_v012"):
+                source_kind = st.radio("Startinhoud", ["Lege maand", "Maandbehoefte kopiëren"],
+                                       key="new_month_content_v013")
+                source_period = None
+                copy_mode = "weekday"
+                if source_kind == "Maandbehoefte kopiëren":
+                    available_sources = [p for p in period_options if next((r["has_demand"]
+                                        for r in month_overview if (r["year"], r["month"]) == p), False)]
+                    if not available_sources:
+                        st.warning("Er is nog geen maand met een ingevulde dienstbehoefte.")
+                    else:
+                        source_period = st.selectbox("Kopieer diensten uit", available_sources,
+                            index=available_sources.index(selected_period) if selected_period in available_sources else 0,
+                            format_func=lambda p: f"{p[1]:02d}/{p[0]}", key="new_month_source_v013")
+                        copy_mode = st.selectbox("Kopieermethode",
+                            ["weekday", "date"],
+                            format_func=lambda v: "Zelfde weekdag (1e maandag → 1e maandag)" if v == "weekday"
+                                                  else "Zelfde kalenderdag (1 → 1)",
+                            key="new_month_mode_v013")
+                        st.caption("Alleen dienstbehoefte; geen toewijzingen, voorkeuren of verlof. "
+                                   "Een extra vijfde weekdag neemt het patroon van de laatste overeenkomstige bronweekdag over.")
+                if st.button("Maand aanmaken", key="create_month_v012",
+                             disabled=(source_kind == "Maandbehoefte kopiëren" and source_period is None)):
                     try:
                         chosen = (new_period_date.year, new_period_date.month)
-                        store.create_month_workspace(engine, *chosen, current_user["employee_id"])
-                        # Streamlit verbiedt het wijzigen van widgetwaarden
-                        # nadat de widget in dezelfde run is aangemaakt.
+                        store.create_month_workspace(engine, *chosen, current_user["employee_id"],
+                             source_period=source_period if source_kind == "Maandbehoefte kopiëren" else None,
+                             copy_mode=copy_mode)
                         st.session_state.switch_to_new_month_v012 = chosen
                         st.rerun()
                     except (ValueError, store.ConflictError) as error:
@@ -418,7 +440,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.12 • Meermaandenbeheer • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.13 • Maandbehoefte kopiëren • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -829,7 +851,37 @@ elif screen == "Maandbehoefte":
     st.subheader("Welke dienstnummers zijn op welke dagen nodig?")
     month_start = date(int(data["year"]), int(data["month"]), 1)
     st.info("Je werkt nu in **" + f"{data['month']:02d}/{data['year']}" +
-            "**. Kies een andere maand links in het zijmenu. Een nieuwe maand begint met een lege dienstbehoefte.")
+            "**. Je kunt een maand leeg starten of de dienstbehoefte uit een eerdere maand overnemen.")
+    if PERSISTENT and is_manager and not data["demand"]:
+        with st.expander("📋 Dienstbehoefte uit een andere maand overnemen"):
+            previous_sources = [p for p in period_options if p != selected_period and next(
+                (bool(r["has_demand"]) for r in month_overview if (r["year"], r["month"]) == p), False)]
+            if not previous_sources:
+                st.info("Er is nog geen andere maand met een ingevulde dienstbehoefte.")
+            else:
+                src = st.selectbox("Bronmaand", previous_sources,
+                    format_func=lambda p: f"{p[1]:02d}/{p[0]}", key="existing_month_source_v013")
+                mode = st.radio("Kopieermethode", ["weekday", "date"],
+                    format_func=lambda v: "Overeenkomstige weekdag" if v == "weekday" else "Zelfde kalenderdag",
+                    key="existing_month_mode_v013")
+                try:
+                    source_data, _ = store.load_month_workspace(engine, *src)
+                    preview = copy_month_demand_rows(source_data, data["year"], data["month"],
+                                                     data["shifts"], mode)
+                    st.caption(f"{len(preview)} dienstregels worden overgenomen; bestaande voorkeuren, "
+                               "afwezigheden en taakbehoeften blijven ongemoeid.")
+                    if preview:
+                        st.dataframe(pd.DataFrame(preview).head(12), hide_index=True,
+                                     use_container_width=True)
+                    if st.button("Kopieer deze dienstbehoefte", key="copy_into_existing_v013",
+                                 disabled=not preview):
+                        store.copy_month_workspace_demand(
+                            engine, src[0], src[1], data["year"], data["month"],
+                            st.session_state.workspace_revision, current_user["employee_id"], mode
+                        )
+                        st.rerun()
+                except (ValueError, store.ConflictError) as error:
+                    st.error(str(error))
     st.dataframe(pd.DataFrame(data["demand"]), hide_index=True, use_container_width=True, height=300)
     with st.form("demand_form"):
         a,b,c = st.columns(3)
