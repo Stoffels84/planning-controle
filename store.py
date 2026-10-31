@@ -886,6 +886,35 @@ def published_plans_before(engine, year: int, month: int, months_back: int = 3) 
                 for _, p in sorted(found.items())]
 
 
+def report_published_window(engine, actor: str, year: int, month: int,
+                            months_back: int = 3) -> list[dict]:
+    """Latest published version for each calendar month, scoped to admin/planner.
+
+    Read-only and never returns drafts. This is NOT a personnel self-service API.
+    """
+    if type(year) is not int or type(month) is not int or not 1 <= month <= 12:
+        raise ValueError("Ongeldige rapportmaand.")
+    if type(months_back) is not int or not 1 <= months_back <= 12:
+        raise ValueError("Het rapportvenster moet 1 tot 12 maanden zijn.")
+    target = year * 12 + month - 1
+    with session_factory(engine)() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Geen rechten om teamrapporten te raadplegen.")
+        month_number = PlanningVersion.year * 12 + PlanningVersion.month - 1
+        versions = s.scalars(select(PlanningVersion).where(
+            PlanningVersion.published_at.is_not(None),
+            month_number <= target,
+            month_number > target - months_back,
+        ).order_by(PlanningVersion.published_at.desc(), PlanningVersion.id.desc())).all()
+        latest = {}
+        for row in versions:
+            latest.setdefault((row.year, row.month), row)
+        return [dict(year=r.year, month=r.month, id=r.id, revision=r.workspace_revision,
+                     payload=r.payload if isinstance(r.payload, dict) else {})
+                for _, r in sorted(latest.items())]
+
+
 def _leave_dict(row: LeaveRequest) -> dict:
     return {"id": row.id, "employee_id": row.employee_id,
             "start_date": row.start_date.isoformat(), "end_date": row.end_date.isoformat(),

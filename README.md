@@ -1,3 +1,47 @@
+# Controleursplanning v0.19 — statistieken en indicatieve eerlijkheid
+
+> **Testomgeving.** Gebruik uitsluitend fictieve personeelsgegevens. De cijfers zijn beschrijvend en vormen geen oordeel over individuele medewerkers, geschiktheid of naleving van arbeidsvoorwaarden.
+
+## Nieuw in v0.19
+
+De planner en beheerder vinden een nieuw onderdeel **Rapportage en eerlijkheid**.
+
+- **Bezetting:** benodigde, toegewezen en openstaande reguliere dienstplaatsen uit de laatst gepubliceerde planningssamenvatting; bij geen benodigde plaatsen staat de bezettingsgraad op *onbekend / niet van toepassing*, niet op 100%.
+- **Per controleur:** aantal diensten en zelfstandige taken, geplande uren, weekenddagen, gewerkte weekends en aantallen per dienstcategorie (Vroeg, Dag, Laat, Nacht).
+- **Weekendverdeling:** indicatieve normalisatie naar 100% contract. Voorbeeld: 2 weekenddagen bij 50% contract wordt getoond als 4 per 100% contract. De *spreiding* is hoogste minus laagste genormaliseerde waarde onder actieve controleurs. Dit is geen rechtvaardigheids- of kwaliteitscijfer: beschikbaarheid, beperkingen en langdurige historische patronen tellen niet volledig mee.
+- **Datumgebonden wensen:** uitsluitend specifiek gewenste vrije dagen of gewenste dienstnummers op een datum. Andere wenssoorten tellen niet mee. Er verschijnt geen respecteringspercentage bij gewijzigde invoer sinds publicatie.
+- **Historiek:** selecteer 1, 2, 3, 6 of 12 maanden; per maand telt uitsluitend de laatst **gepubliceerde** versie, nooit een concept. Contractpercentages en namen komen voorlopig uit de *huidige* catalogus; wijzigingen daarvan kunnen historische vergelijkingen vertekenen.
+- **Excel-export:** vijf tabbladen: Samenvatting, Per controleur, Categorieen, Maandhistoriek, Toelichting. Tekstvelden worden bij export beschermd tegen het als formule behandelen van ingevoerde tekst.
+
+De rapportage **leest alleen**. De solver, publicaties, verlofprocedures, meldingen en bestaande tabellen zijn niet gewijzigd. Er is **geen databasemigratie** nodig.
+
+## Installatie vanuit de werkende versie 0.18.1
+
+1. Bewaar je huidige GitHub-commit als herstelpunt en maak een back-up van je PostgreSQL-testdatabase.
+2. Pak `controleursplanning-github-streamlit-v019.zip` uit.
+3. Upload de bestanden naar de hoofdmap van dezelfde private GitHub-repository. Vervang `app.py` en `store.py`, voeg het nieuwe `report_v019.py` toe. Laat alle andere bestaande bestanden uit het pakket op hun plaats staan.
+4. Commit en laat Streamlit Community Cloud de app herstarten.
+5. Laat `DATABASE_URL`, accounts en overige Streamlit Secrets **ongewijzigd**.
+
+## Gerichte online test
+
+1. Meld je als **beheerder/planner** aan, selecteer een maand met gepubliceerde testplanning en open **Rapportage en eerlijkheid**.
+2. Vergelijk bezetting en planuren met het tabblad **Planning** en controleer bij een weekenddienst de teller van de betrokken fictieve controleur.
+3. Kies 3 maanden in het historiekvenster. Controleer dat een nieuw concept de bestaande cijfers **niet** overschrijft; pas een nieuwe publicatie hoort de getoonde planning te wijzigen.
+4. Download de Excel-export; controleer de vijf tabbladen en enkele personeelswaarden.
+5. Meld je aan als fictieve **controleur**; het teamrapport hoort niet beschikbaar te zijn.
+6. Wijzig als planner een fictieve voorkeur ná publicatie: het rapport blijft de oorspronkelijke gepubliceerde dienstinformatie tonen, met waarschuwing dat de huidige invoer nieuwer is en zonder verouderd wenspercentage.
+
+## Teststatus
+
+- **137 geautomatiseerde tests geslaagd**, waaronder 9 nieuwe rapportagetests.
+- **9 OR-Tools-testmodules overgeslagen** wegens ontbrekende OR-Tools in deze ontwikkelomgeving. De solver is in v0.19 ongemoeid gelaten.
+- Python-syntaxcontrole is geslaagd. De Streamlit-gebruikersinterface is nog niet op jouw hosting getest.
+
+---
+
+## Eerdere versies (archief)
+
 # Controleursplanning v0.18.1 — goedgekeurd verlof gecontroleerd intrekken
 
 > **Uitsluitend fictieve testgegevens.** Nog niet geschikt voor daadwerkelijke personeelsplanning bij De Lijn. Werkelijke arbeidsregels, beveiliging, privacy, back-ups en hosting zijn nog niet volledig gevalideerd.
