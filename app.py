@@ -34,8 +34,9 @@ from portal_v016 import (month_weeks, preference_summary, week_choices, save_wee
                          personal_calendar, own_published_assignments, DAYS_NL, PRIORITIES)
 from portal_v017 import month_tiles, personal_publication_changes, personal_request_feed, WEEKDAYS as CALENDAR_DAYS
 from report_v019 import build_report, safe_excel_rows
+from diagnostics_v021 import analyze_month, explain_open_positions
 
-st.set_page_config(page_title="Controleursplanning | v0.19.2", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.21", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -152,7 +153,7 @@ def example_excel(year: int, month: int, rows: tuple[tuple[str, int], ...]) -> b
     return buffer.getvalue()
 
 
-def plan_excel(plan, state: dict) -> bytes:
+def plan_excel(plan, state: dict, diagnosis: dict | None = None) -> bytes:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         pd.DataFrame(plan.assignments).to_excel(writer, index=False, sheet_name="Toewijzingen")
@@ -166,6 +167,12 @@ def plan_excel(plan, state: dict) -> bytes:
             writer, index=False, sheet_name="Dienstverdeling")
         pd.DataFrame(plan.task_assignments).to_excel(writer, index=False, sheet_name="Taaktoewijzingen")
         pd.DataFrame(plan.open_tasks).to_excel(writer, index=False, sheet_name="Open taken")
+        if diagnosis is not None:
+            pd.DataFrame(safe_excel_rows(diagnosis["slots"])).to_excel(writer, index=False, sheet_name="Haalbaarheid diensten")
+            pd.DataFrame(safe_excel_rows(diagnosis["days"])).to_excel(writer, index=False, sheet_name="Haalbaarheid dagen")
+            pd.DataFrame(safe_excel_rows(diagnosis["blockers"])).to_excel(writer, index=False, sheet_name="Blokkeringen indicatief")
+            pd.DataFrame(safe_excel_rows(explain_open_positions(diagnosis, plan.open_positions))).to_excel(
+                writer, index=False, sheet_name="Uitleg open plaatsen")
     return buffer.getvalue()
 
 
@@ -451,7 +458,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.19.2 • Teamrapportage en indicatieve roosterverdeling • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.21 • Haalbaarheidsanalyse en gerichte knelpunten • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -1300,6 +1307,42 @@ elif screen == "Planning":
     if any(v is None for v in boundary_context["sources"].values()):
         st.info("Zonder gepubliceerde aangrenzende maand kunnen de rusttijden en dienstreeksen "
                 "aan die kant nog niet definitief worden gecontroleerd. Herbereken later indien nodig.")
+    # v0.21: indicatieve controle van individuele dienstgeschiktheid.
+    # Dit is GEEN solver en mag geen harde planningsregels automatisch wijzigen.
+    diagnosis = None
+    if not errors:
+        try:
+            diagnosis = analyze_month(data, boundary_context["assignments"])
+        except Exception:
+            logging.exception("DIAG_V021: voorafgaande analyse mislukt")
+            st.warning("De indicatieve haalbaarheidscontrole is tijdelijk niet beschikbaar. De bestaande berekening blijft beschikbaar.")
+    with st.expander("🔎 Haalbaarheid vóór berekening (indicatief)", expanded=False):
+        st.caption("Deze controle bekijkt individuele blokkeringen per dienst en de hoeveelheid unieke "
+                   "kandidaten per kalenderdag. De volledige combinaties van rust, diensten, "
+                   "uren, werkreeksen en taken worden uitsluitend door OR-Tools berekend. "
+                   "Een dag zonder direct tekort is dus niet automatisch volledig planbaar.")
+        if diagnosis is not None:
+            overview = diagnosis["summary"]
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Actieve controleurs", overview["active_staff"])
+            c2.metric("Benodigde dienstplaatsen", overview["service_places"])
+            c3.metric("Direct tekort (minimum)", overview["direct_shortfall"])
+            c4.metric("Dagen met direct capaciteitstekort", overview["days_with_shortfall"])
+            if overview["direct_shortfall"] or overview["days_with_shortfall"]:
+                st.warning("Er zijn directe capaciteitsknelpunten gevonden. Controleer eerst de "
+                           "dienstbehoefte, beschikbaarheid en geldende harde beperkingen. "
+                           "Dit is geen advies om rust- of arbeidsregels te versoepelen.")
+            if diagnosis["slots"]:
+                st.markdown("**Per dienstnummer**")
+                st.dataframe(pd.DataFrame(diagnosis["slots"]), hide_index=True, use_container_width=True)
+                st.markdown("**Capaciteit per kalenderdag**")
+                st.dataframe(pd.DataFrame(diagnosis["days"]), hide_index=True, use_container_width=True)
+                st.markdown("**Vaak voorkomende individuele blokkeringen**")
+                st.dataframe(pd.DataFrame(diagnosis["blockers"]), hide_index=True, use_container_width=True)
+            else:
+                st.info("Er zijn nog geen dienstplaatsen ingevoerd in de geselecteerde maand.")
+        else:
+            st.info("De haalbaarheidscontrole is niet beschikbaar zolang de invoer fouten bevat.")
     if st.button("🚀 Bereken maandplanning", type="primary", disabled=bool(errors)):
         try:
             with st.spinner("OR-Tools zoekt een zo goed mogelijke planning…"):
@@ -1382,7 +1425,15 @@ elif screen == "Planning":
             with t2:
                 st.dataframe(pd.DataFrame(plan.open_positions), use_container_width=True, hide_index=True)
                 if plan.open_positions:
-                    st.info("Probeer de bezetting, beschikbare medewerkers, inzetbaarheidsbeperkingen en rusttijden te controleren. Het model schendt geen ingestelde harde regels.")
+                    st.info("De onderstaande oorzaken zijn indicaties, geen solververklaring. "
+                            "Ook dienstcombinaties, werkreeksen, urenlimieten en taken kunnen "
+                            "ervoor zorgen dat een plaats openblijft.")
+                    if diagnosis is not None:
+                        if plan_record and plan_record["revision"] != st.session_state.workspace_revision:
+                            st.warning("De diagnose gebruikt de huidige invoer, maar dit concept is ouder. "
+                                       "Herbereken de planning voor een actuele vergelijking.")
+                        st.dataframe(pd.DataFrame(explain_open_positions(diagnosis, plan.open_positions)),
+                                     use_container_width=True, hide_index=True)
             with t3:
                 st.dataframe(pd.DataFrame(hours_overview(data["employees"], plan.assignments,
                                        data.get("hour_credits", []),
@@ -1398,7 +1449,7 @@ elif screen == "Planning":
                     st.dataframe(pd.DataFrame(plan.task_assignments), hide_index=True, use_container_width=True)
                 with tb:
                     st.dataframe(pd.DataFrame(plan.open_tasks), hide_index=True, use_container_width=True)
-            st.download_button("⬇️ Planning downloaden als Excel", data=plan_excel(plan, data),
+            st.download_button("⬇️ Planning downloaden als Excel", data=plan_excel(plan, data, diagnosis),
                                file_name=f"controleursplanning_{data['year']}_{data['month']:02d}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         elif plan.summary["open"] is None:

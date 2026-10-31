@@ -1,3 +1,50 @@
+# Controleursplanning v0.21 — haalbaarheidscontrole en knelpuntenanalyse
+
+> **Uitsluitend fictieve testgegevens.** Dit prototype is niet goedgekeurd voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels moeten afzonderlijk worden gevalideerd.
+
+## Wat is nieuw ten opzichte van de werkende v0.20?
+
+Onder **Planning** verschijnt een extra onderdeel **🔎 Haalbaarheid vóór berekening (indicatief)**. De invoer wordt gecontroleerd **zonder** de OR-Tools-solver op te starten:
+
+- Per dienstnummer: hoeveel plaatsen vereist zijn, hoeveel **individuele** kandidaten op het eerste gezicht inzetbaar zijn, een **aantoonbaar minimaal tekort** als er te weinig kandidaten zijn, en de vaakst voorkomende directe blokkering.
+- Per kalenderdag: vergelijking tussen het aantal dienstplaatsen en het aantal **unieke** direct inzetbare controleurs. Eén controleur mag niet twee diensten met dezelfde startdatum uitvoeren. De berekende ondergrens voor het dagtekort kan dus groter zijn dan het tekort per dienstnummer.
+- Redenenoverzicht: hoeveel *kandidaat-dienstcombinaties* worden uitgesloten door categorie, dienstnummer, weekdag, afwezigheid, rustdag/activiteit, beschermd weekend, gepubliceerde aangrenzende maand, minimumduur versus maandurenmaximum, een maximum van nul voor de categorie, of weekendmaximum nul.
+- Bij **Openstaande plaatsen** na een berekening: een indicatieve duiding naast de werkelijk open gebleven dienstplaatsen. Waar de directe analyse geen tekort aantoont, worden geen speculatieve oorzaken als vaststaand feit gepresenteerd.
+- Bij de bestaande **Excel-export van een planning** komen vier extra tabbladen: *Haalbaarheid diensten*, *Haalbaarheid dagen*, *Blokkeringen indicatief* en *Uitleg open plaatsen*. Inhoud uit vrije tekstvelden wordt bij de nieuwe tabbladen beveiligd tegen Excel-formules.
+
+### Wat bewijst deze analyse wel en niet?
+
+Een tekort aan kandidaten voor één dienst is een **wiskundige ondergrens**: de benodigde plaatsen kunnen onmogelijk allemaal gevuld worden. Een tekort aan unieke kandidaten op één datum is eveneens noodzakelijk onvermijdelijk als iedereen die datum maximaal één dienst kan krijgen.
+
+**Geen tekort gevonden betekent niet dat het volledige rooster mogelijk is.** De afzonderlijke kandidaatcontrole rekent nog niet met wederzijdse combinaties van diensten, maximumreeksen, volledige maandurenverdeling, taaktoewijzingen, en alle beperkingen die pas door meerdere beslissingen tegelijk ontstaan. Hiervoor blijft de bestaande Google OR-Tools-berekening nodig. De diagnose verandert geen enkele harde regel, personeelsfiche, voorkeur of toewijzing. Zachte vrije-dagwensen tellen niet als harde onbeschikbaarheid.
+
+Bij wijzigingen aan de maandinvoer kan een eerder berekend concept verouderd zijn. De app waarschuwt wanneer de diagnose met actuele invoer wordt vergeleken met een ouder concept. Aangrenzende maanden tellen alleen mee wanneer de laatste versie **gepubliceerd** is.
+
+## Installatie
+
+1. Bewaar eerst je werkende **v0.20 GitHub-commit** als herstelpunt en maak een **PostgreSQL-back-up**.
+2. Pak `controleursplanning-github-streamlit-v021.zip` uit en upload alle bestanden naar de root van **dezelfde private GitHub-repository**.
+3. Vervang `app.py`, voeg **`diagnostics_v021.py`** en `tests/test_v021_diagnostics.py` toe. De overige bestaande modules worden meegeleverd.
+4. Commit en herstart/open de Streamlit-app. **Bestaande database, accounts en Streamlit Secrets blijven ongewijzigd.** Er zijn geen nieuwe tabellen of migraties.
+
+## Testscenario in Streamlit
+
+1. Open als fictieve beheerder **Planning** en vouw **Haalbaarheid vóór berekening** open. Kijk of de dienstbehoefte, aantallen en de tabel per dag zichtbaar zijn.
+2. Blokkeer bij een testdienst een categorie voor bijna alle fictieve controleurs. De lijst *Direct inzetbare kandidaten* moet dalen; bij onvoldoende kandidaten verschijnt een *Direct tekort (ondergrens)*.
+3. Maak met slechts één beschikbare fictieve controleur twee verschillende diensten op dezelfde dag noodzakelijk (beide met één plaats). Beide diensten hebben dan afzonderlijk één kandidaat, maar op dagniveau is er minimaal één open plaats.
+4. Test met een gepubliceerde nachtdienst op de laatste dag van de vorige maand of een vroege dienst op de eerste dag van de actieve maand als geblokkeerd wordt geteld.
+5. Bereken de maandplanning en open **Openstaande plaatsen**. De duiding mag een individuele blokkering benoemen als indicatie, maar mag geen garantie geven dat het plan kan worden ingevuld.
+6. Download de planning als Excel en controleer de vier nieuwe tabbladen. Open vervolgens **Verlofaanvragen beheren** en **Rapportage en eerlijkheid** om te controleren dat de v0.20- en v0.19.2-functies nog werken.
+
+## Tests, techniek en beperkingen
+
+- **164 automatische tests geslaagd**, **9 solvermodules overgeslagen** in de huidige lokale omgeving vanwege ontbrekende OR-Tools.
+- `planner.py`, `store.py` en databaseschema zijn **ongewijzigd** ten opzichte van v0.20. Alleen `app.py`, het nieuwe `diagnostics_v021.py`, de nieuwe tests en documentatie zijn gewijzigd.
+- Tests omvatten rechtstreekse uitsluitingen, nacht-overlap met een geregistreerde afwezigheid, maandgrens met nachtdienst, het unieke-kandidaten-dagtekort, uur- en categoriemaxima en het veilig labelen van onverklaarde open plaatsen.
+- Streamlit-rendering en solverwerking moeten nog in je eigen testomgeving worden bevestigd. De geaggregeerde diagnose toont geen namen of personeelsnummers van individuele kandidaten.
+
+---
+
 # Controleursplanning v0.20 — gedeeltelijke intrekking van goedgekeurd verlof
 
 > **Uitsluitend fictieve testgegevens.** Dit is een prototype, geen goedgekeurde toepassing voor echte personeelsgegevens of officiële verlofrechten. De arbeidsregels en beveiliging zijn nog niet volledig juridisch/operationeel gevalideerd.
