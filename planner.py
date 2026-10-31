@@ -20,6 +20,7 @@ from ortools.sat.python import cp_model
 from catalog import (is_unavailable_during, profile, settings_with_defaults, transition_code,
                      validate_employee, validate_shift, validate_schedule_settings)
 from extras import preference_type, rest_blocked_during, validate_extras
+from policy_v06 import touches_protected_weekend, saturday_for
 
 
 @dataclass
@@ -115,7 +116,10 @@ def solve_month(data: dict) -> PlanResult:
     staff_day = defaultdict(list)
     employee_vars = defaultdict(list)
     weekend_vars = defaultdict(list)
+    worked_weekends = defaultdict(lambda: defaultdict(list))
+    category_month_vars = defaultdict(list)
     pref_penalty_terms = []
+    category_targets_penalty = []
     all_assigned = []
     settings = settings_with_defaults(data["settings"])
 
@@ -139,14 +143,18 @@ def solve_month(data: dict) -> PlanResult:
                 continue
             if rest_blocked_during(emp, interval_start, interval_end, credit_entries):
                 continue
+            if touches_protected_weekend(emp, interval_start, interval_end):
+                continue
             var = model.new_bool_var(f"x_{ei}_{ri}")
             x[ei, ri] = var
             eligible.append(var)
             all_assigned.append(var)
             staff_day[ei, req["date"]].append(var)
             employee_vars[ei].append((ri, var))
+            category_month_vars[ei, sh["category"]].append(var)
             if d.weekday() >= 5:
                 weekend_vars[ei].append(var)
+                worked_weekends[ei][saturday_for(d).isoformat()].append(var)
             for pref in preferences_by_employee[emp["id"]]:
                 kind = preference_type(pref)
                 priority = int(pref["priority"])
@@ -247,6 +255,31 @@ def solve_month(data: dict) -> PlanResult:
         max_mins = int(emp["max_month_hours"] * 60)
         model.add(sum(minutes_between(shifts[slots[ri]["shift_id"]]["start"], shifts[slots[ri]["shift_id"]]["end"]) * var for ri, var in employee_vars[ei]) <= max_mins)
 
+        # v0.6: maximum diensten per categorie/maand (hard) en streefwaarden (zacht).
+        for cat in ("Vroeg", "Dag", "Laat", "Nacht"):
+            month_count = sum(category_month_vars[ei, cat])
+            bounds = [n for n in (settings["max_month_categories"].get(cat),
+                                  emp["max_month_categories"].get(cat)) if n is not None]
+            if bounds:
+                model.add(month_count <= min(bounds))
+            goal = emp["target_month_categories"].get(cat)
+            if goal is not None:
+                gap = model.new_int_var(0, 31, f"cat_target_{ei}_{cat}")
+                model.add_abs_equality(gap, month_count - goal)
+                category_targets_penalty.append(gap)
+
+        weekend_maxima = [n for n in (settings["max_weekend_days"], emp["max_weekend_days"])
+                          if n is not None]
+        if weekend_maxima:
+            model.add(sum(weekend_vars[ei]) <= min(weekend_maxima))
+        if emp["max_worked_weekends"] is not None:
+            weekend_used = []
+            for saturday, assigned in worked_weekends[ei].items():
+                worked = model.new_bool_var(f"worked_weekend_{ei}_{saturday}")
+                model.add_max_equality(worked, assigned)
+                weekend_used.append(worked)
+            model.add(sum(weekend_used) <= emp["max_worked_weekends"])
+
     # Eenvoudige spreiding: afwijking van gemiddelde aantal diensten + weekenddiensten.
     total = sum(all_assigned)
     fairness = []
@@ -261,7 +294,8 @@ def solve_month(data: dict) -> PlanResult:
     hours_deviations = []
     for ei, emp in enumerate(employees):
         credits = sum(float(c["hours"]) for c in credit_entries if c["employee_id"] == emp["id"])
-        target = int(round((float(emp.get("target_month_hours", 0)) - credits) * 60))
+        balance = float(emp.get("opening_hour_balance", 0)) if settings["use_opening_balance"] else 0.0
+        target = int(round((float(emp.get("target_month_hours", 0)) - credits - balance) * 60))
         if float(emp.get("target_month_hours", 0)) <= 0:
             continue
         # Geregistreerde uren verlagen het nog te plannen streefdoel,
@@ -273,10 +307,19 @@ def solve_month(data: dict) -> PlanResult:
         deviation = model.new_int_var(0, 60000, f"hours_deviation_{ei}")
         model.add_abs_equality(deviation, worked - target)
         hours_deviations.append(deviation)
-    total_weekends = sum(v for vals in weekend_vars.values() for v in vals)
+    # Weekend-eerlijkheid: handmatig ingevoerde historische weekenddagen
+    # meewegen, met ruwe normalisatie naar contractpercentage.
+    normalized = []
+    upper_rate = 1000  # contractpercentage minimaal 1
+    for ei, emp in enumerate(employees):
+        factor = round(1000 / int(emp["contract_percent"]))
+        prior = int(emp.get("historic_weekend_days", 0))
+        normalized.append((prior + sum(weekend_vars[ei])) * factor)
+    total_normalized = sum(normalized)
+    deviation_bound = max(1, staff_count * (200 + needed) * upper_rate)
     for ei in range(len(employees)):
-        dev = model.new_int_var(0, len(slots) * staff_count * 20, f"weekend_{ei}")
-        model.add_abs_equality(dev, staff_count * sum(weekend_vars[ei]) - total_weekends)
+        dev = model.new_int_var(0, deviation_bound, f"weekend_{ei}")
+        model.add_abs_equality(dev, staff_count * normalized[ei] - total_normalized)
         fairness.append(dev)
 
     # Groot genoeg voor lexicografische voorrang van dekking boven zachte scores.
@@ -288,11 +331,13 @@ def solve_month(data: dict) -> PlanResult:
     # Voor dekking voorrang op ALLE zachte voorkeuren: ruime bovengrens
     # op gewenste werkdagen, categorieën, diensten en overgangswensen.
     preference_bound = 30 * max(1, len(data["preferences"])) * max(1, needed) + needed
-    covering_cost = (1 + pref_weight * preference_bound
-                     + fair_weight * (2 * staff_count * staff_count * needed)
+    category_target_bound = 31 * staff_count * 4
+    fairness_bound = staff_count * (staff_count * needed * 2 + deviation_bound)
+    covering_cost = (1 + pref_weight * (preference_bound + category_target_bound)
+                     + fair_weight * fairness_bound
                      + hours_weight * (60000 * staff_count))
     model.minimize(covering_cost * sum(vacancy.values())
-                   + pref_weight * sum(pref_penalty_terms)
+                   + pref_weight * (sum(pref_penalty_terms) + sum(category_targets_penalty))
                    + fair_weight * sum(fairness)
                    + hours_weight * sum(hours_deviations))
 

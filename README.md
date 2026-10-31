@@ -1,82 +1,72 @@
-# Controleursplanning — v0.5 (proefproject, fictieve gegevens)
+# Controleursplanning v0.6 — uitsluitend fictieve testgegevens
 
-Streamlit + GitHub + Google OR-Tools + PostgreSQL. **Geen productietoepassing.** Gebruik alleen fictieve medewerkers en fictieve planningen; de arbeidstijdregels zijn niet juridisch/sectoraal gevalideerd.
+**Stack:** GitHub + Streamlit + Python + OR-Tools + PostgreSQL. Volledige voortzetting van v0.5, geen destructieve migratie. **Geen bedrijfsapplicatie**: het is een prototype, arbeidstijd- en sectorregels zijn niet juridisch gevalideerd.
 
-## Nieuwe onderdelen ten opzichte van werkende v0.4
+## Nieuw in v0.6
 
-### 1. Individuele rustdagen (Controleurs → Rustdagenregeling)
-- Per controleur instelbaar: **Automatisch / Vast / Combinatie**.
-- Bij **Vast** en **Combinatie** kunnen weekdagen en afzonderlijke datums als **verplicht vrij** worden aangeduid.
-- Een dienst die een vaste rustdag ook maar gedeeltelijk overlapt (bv. een nachtdienst van de vorige dag) wordt geweigerd.
-- **Automatisch** legt geen nieuwe vaste rustdagen op; OR-Tools laat dagen vrij die niet met een dienst worden gevuld.
-- **Beperking:** de modi Vast en Combinatie behandelen **opgegeven rustdagen** als verplicht, maar vormen nog **geen volledige persoonlijke werk-/rustcyclus**. Het model garandeert niet dat alle niet-geblokkeerde dagen werkdagen worden. Arbeidsregimes blijven voorlopig gebaseerd op maxima en zachte maandstreefuren.
+### Weekend en maandgrenzen (nieuw tabblad)
 
-### 2. Zes soorten persoonlijke voorkeuren (Voorkeuren / Mijn voorkeuren)
-1. Gewenste vrije dag (datum)
-2. Gewenste werkdag (datum)
-3. Voorkeur / vermijden van dienstcategorie (maandbreed)
-4. Voorkeur / vermijden van dienstnummer (maandbreed)
-5. Elke week een bepaalde weekdag liefst vrij
-6. Liever geen bepaalde overgang tussen categorieën op opeenvolgende startdatums
+- Centraal **maximum weekenddienst-dagen per maand** op basis van de startdatum (zaterdag of zondag), aan/uit instelbaar; individueel kunnen strengere maxima gelden.
+- Per medewerker **maximum aantal gewerkte weekends**: een weekend telt één keer, ook wanneer iemand zowel zaterdag als zondag werkt. Een weekend dat begint in de vorige maand maar eindigt in de huidige maand wordt herkend.
+- **Verplicht vrije weekends** instelbaar voor een individuele controleur. Het weekend loopt van zaterdag 00.00 tot maandag 00.00 uur. Dit blokkeert ook een overlappende nachtdienst van vrijdag op zaterdag of zondag op maandag.
+- **Maximumaantal diensten per categorie, per kalendermaand**, zowel algemeen als per controleur, als harde grens. `0` in de interface betekent 'geen maximum' voor de categorie; de beperking 'geen Nachtdiensten' van het profiel blijft hiervoor geschikt.
+- Per controleur **streefaantal vroege/dag/late/nachtdiensten** als zachte wens, niet als minimumgarantie. Leeg = geen streefwaarde; 0 = streef naar nul.
+- Historische weekenddagen kunnen **handmatig** worden opgegeven om de zachte weekend-eerlijkheid meermaandsgericht te simuleren. De verdeling wordt ruw gecorrigeerd voor arbeidspercentage, maar is nog geen formeel eerlijkheidsmodel. **Automatische historische aggregatie wordt later gebouwd.**
 
-Iedere wens heeft prioriteit **1–3** en is altijd *zacht*. Dekking en harde regels blijven vooropstaan. Controleurs kunnen uitsluitend hun eigen voorkeuren opslaan; planners beheren alle voorkeuren. Oudere vrije-dagwensen uit v0.4 blijven geldig.
+### Uren (proefverrekening)
 
-**Beperkingen:** voorkeuren zijn momenteel niet beperkt door configureerbare maandmaxima of indienperiodes; exacte wensweging is een proefscore. De in v0.4 ingestelde algemene voorkeurscategorie per medewerker blijft bestaan en wordt ook meegewogen. De zes voorkeurtypes zijn niet hetzelfde als goedgekeurd verlof.
+- Per medewerker een optioneel **startsaldoveld** van −80 tot +80 uur.
+- De beheerder kan centraal de **simulatie van startsaldo** aan- of uitzetten. Als aan, kan de optimizer bij het zachte maandstreefdoel rekening houden met het startsaldo en eerder geregistreerde testcredits. Een positief saldo verlaagt de nagestreefde te plannen uren.
+- In tabblad **Uren en activiteiten**, de berekende **Planning** en in de Excel-export verschijnt een apart overzicht met planuren, testcredits, start-, eind- en afwijkingssaldos.
+- In Excel is er ook een nieuw tabblad **Dienstverdeling**, met toegewezen diensten per categorie en gewerkte weekenddagen.
+- **Belangrijk:** dit is uitsluitend rekenkundige simulatie van een saldo, geen wettelijk correcte uren-, verlof-, ziekte-, feestdagen-, loon- of overurenadministratie. Er wordt **nog geen automatisch saldo uit vorige maanden** geladen of definitief doorgeschoven.
 
-### 3. Testregistratie van uren en activiteiten (Uren en activiteiten)
-- Beheerder/planner kan per kalenderdag voor een fictieve controleur **Verlof, Ziekte, Opleiding, Feestdag, Bijzondere opdracht, Andere** registreren, met meegetelde uren (0–16).
-- Eén registratie per medewerker per datum. Elke geregistreerde dag blokkeert **de volledige kalenderdag** voor reguliere diensten, ook bij een overlappende nachtdienst.
-- **Urenoverzicht** bij het tabblad Uren en activiteiten én bij een berekende planning: geplande diensturen + afzonderlijk meegetelde uren + afwijking t.o.v. zachte maandstreefuren.
-- Excel-export van de planning bevat een extra tabblad **Urenoverzicht**.
-- De zachte streefurenoptimalisatie houdt rekening met de geregistreerde uren.
+## Upgraden van v0.5 naar v0.6
 
-**Belangrijk:** dit is **geen** officiële berekening van contracturen, betaalde ziekte, feestdagen, verlofrechten, overuren of overdraagbare urensaldi. De opgegeven uren zijn handmatige testwaarden; ook korte opdrachten blokkeren in deze versie de hele dag. `Max. maanduren` blijft een bovengrens voor **ingeplande diensten**, los van de geregistreerde credits.
+1. Bewaar de huidige werkende v0.5 op GitHub als **tag/herstelpunt**. Maak bovendien via je PostgreSQL-provider een echte **databaseback-up**; een GitHub-codekopie bevat geen databasegegevens.
+2. Pak `controleursplanning-github-streamlit-v06.zip` uit en upload de inhoud naar de **hoofdmap** van je bestaande **private** GitHub-repository. Overschrijf bestaande Pythonbestanden en voeg het **nieuwe `policy_v06.py`** en de nieuwe tests toe.
+3. Laat de bestaande Streamlit Secrets, in het bijzonder `DATABASE_URL`, ongewijzigd. Zorg dat de eenmalige `ADMIN_RECOVERY_KEY` van je eerdere herstelactie verwijderd is.
+4. Laat Streamlit opnieuw uitrollen. Log in met hetzelfde personeelsnummer en wachtwoord. Je bestaande gegevens blijven in dezelfde PostgreSQL-werkruimte; nieuwe velden krijgen terugwaarts compatibele standaardwaarden.
+5. Test alleen met fictieve medewerkers, nooit met echte controleurs- of personeelsgegevens.
 
-## Upgraden van v0.4 naar v0.5
+### Test A — bescherm een weekend
 
-1. **Bewaar eerst een GitHub-tag/herstelpunt van v0.4** en maak bij je databaseprovider een **echte PostgreSQL-back-up**. Een ZIP-back-up van alleen de code is geen databaseback-up.
-2. Pak `controleursplanning-github-streamlit-v05.zip` uit. Upload de **inhoud** naar de hoofdmap van je bestaande **private** GitHub-repository en vervang bestaande bestanden. **Voeg het nieuwe `extras.py` toe.** Neem ook `tests/` mee.
-3. Laat alle bestaande **Streamlit Secrets**, inclusief `DATABASE_URL`, ongewijzigd. `ADMIN_RECOVERY_KEY` hoort verwijderd te zijn na het eerdere account-herstel.
-4. Wacht op de gewone automatische heruitrol van Streamlit en meld je aan met je bestaande account. **Geen nieuwe database, geen migratie en geen accountreset vereist.** Nieuwe veldwaarden worden in dezelfde JSON-werkruimte opgeslagen; oude documenten behouden hun bestaande structuur totdat je iets wijzigt.
-5. Gebruik alleen fictieve voorbeelden voor deze testversie.
+- Open **Weekend en maandgrenzen**. Kies een fictieve controleur en vink het weekend dat begint op een zaterdag in je planningsmaand aan.
+- Klik **Individuele instellingen bewaren**, ga naar **Planning** en bereken opnieuw.
+- Controleer dat deze persoon zaterdag en zondag niet is ingepland. Controleer óók dat een late vrijdag-nachtdienst die doorloopt tot zaterdag niet wordt toegewezen.
 
-### Testscenario A: verplichte rustdag
+### Test B — maximum per categorie en weekend
 
-- Open **Controleurs → Rustdagenregeling**.
-- Kies `DEMO001`, selecteer **Combinatie** en voeg een rustdatum toe die in de actieve maand een benodigde dienst bevat. Sla op.
-- Bereken de maandplanning opnieuw. Controleer dat deze controleur op die kalenderdag **niet** ingepland is, ook niet met een nachtdienst die tot in die dag loopt.
+- Stel in het nieuwe tabblad voor één fictieve controleur **max. nachtdiensten per maand = 1** in. Bereken opnieuw en controleer via **Dienstverdeling** dat het maximum wordt gerespecteerd.
+- Stel vervolgens **max. weekenddagen = 1** in, en controleer dat de controleur maximaal één dienst krijgt waarvan de startdatum op zaterdag of zondag ligt.
+- De solver mag daardoor **openstaande dienstplaatsen** tonen. Harde maxima worden niet genegeerd om de bezetting toch vol te maken.
 
-### Testscenario B: de zes voorkeurtypes
+### Test C — uurensaldo (rekenproef)
 
-- Maak via **Voorkeuren** zes verschillende zachte wensen voor een fictieve controleur; klik bij elk op **Voorkeur opslaan**.
-- Controleer of de wensen onder het gekozen personeelsnummer verschijnen.
-- Bereken opnieuw. Wensen mogen worden afgewezen als bezetting of harde rustregels dat vereisen; de solver beslist over het beste compromis.
+- Vul bij één fictieve medewerker in **Weekend en maandgrenzen** een startsaldo van `+5,0 uur` in.
+- Vink centraal **Testsaldo meenemen bij het optimaliseren** aan en kijk of de resultaten in het urenoverzicht veranderen.
+- Het rekenkundige eindsaldo is `startsaldo + planuren + activiteitscredits − streefuren`, alleen indien streefuren zijn ingesteld.
+- Download de Excel-export en controleer de tabbladen **Urenoverzicht test** en **Dienstverdeling**.
 
-### Testscenario C: urenoverzicht
+## Technische opbouw
 
-- Registreer bij **Uren en activiteiten** een fictieve opleidingsdag met `7,6` uur.
-- Controleer dat er geen reguliere dienst op die dag wordt toegekend en dat de uren in het overzicht verschijnen.
-- Download de planning als Excel en open het tabblad **Urenoverzicht**.
-
-## Bestanden
-
-| Bestand | Wat doet het? |
+| Bestand | Inhoud |
 |---|---|
-| `app.py` | Streamlit-schermen, rollen, voorkeuren, rustdagen en urenoverzicht |
-| `extras.py` | Nieuwe voorkeurtypes, rustdag/activiteitstoetsen, urenoptelling |
-| `catalog.py` | Personeelsprofielen, achterwaarts compatibele defaults, validaties |
-| `planner.py` | OR-Tools-toewijzing en nieuwe zachte/harde optimalisatieregels |
-| `store.py` | Bestaande PostgreSQL-accounts en opslag (ongewijzigd) |
-| `demo_data.py` | Fictieve testgegevens |
-| `tests/` | Database-, validatie- en integratietests |
+| `app.py` | Bestaande webapp + nieuwe regel- en rapportschermen |
+| `policy_v06.py` | Nieuwe zuivere weekend-, categorie-, validatie- en urensaldofuncties |
+| `catalog.py` | Nieuwe velden met veilige defaults en validatie |
+| `planner.py` | Nieuwe CP-SAT-beperkingen en zachte streefwaardes |
+| `extras.py`, `store.py`, `demo_data.py` | Bestaande v0.5-modules, ongewijzigd |
+| `tests/test_v06_policy.py` | Zuivere v0.6-tests |
+| `tests/test_v06_solver.py` | OR-Tools-integratietests, alleen uitvoerbaar waar OR-Tools geïnstalleerd is |
 
-## Teststatus
+## Teststatus van dit pakket
 
-- Syntaxcontrole met `python -m compileall`: **geslaagd**.
-- `pytest`: **23 tests geslaagd, 3 modules overgeslagen**. OR-Tools was in de uitvoeromgeving niet geïnstalleerd en installatie via het pakketnetwerk was niet mogelijk. De nieuwe CP-SAT-integratietests moeten dus **op je Streamlit-omgeving of lokaal met de packages geïnstalleerd** uitgevoerd worden.
-- De Streamlit-interface zelf is hier niet live gestart. Versioneer en test de update voor je verdergaat.
+- Python-syntaxcontrole: geslaagd.
+- `python -m pytest -q`: **30 geslaagd, 4 testmodules overgeslagen**, omdat OR-Tools niet kon worden geïnstalleerd in de uitvoeromgeving.
+- Streamlit-app werd in deze omgeving niet met de browser getest. De solveruitbreidingen moeten op jouw Streamlit-omgeving getest worden voordat ze als werkend kunnen worden beschouwd.
 
-### Lokaal testen (Windows)
+### Optioneel lokaal testen (Windows)
 
 ```powershell
 py -3.11 -m venv .venv
@@ -87,6 +77,6 @@ python -m pytest -q
 streamlit run app.py
 ```
 
-## Nog niet gebouwd
+## Bewuste beperkingen en volgende stappen
 
-Volledige vaste werk-/rustcycli, maandgrenscontrole, officiële wettelijke uren- en saldoverrekening, verplaatsingstijden, bijzondere taakplanning, ruilaanvragen, automatische voorkeurdeadlines/maxima, betrouwbare achtergrondworkers, automatisch externe back-ups en bedrijfsbrede beveiligingsvalidatie. **Gebruik geen echte personeelsgegevens.**
+De v0.6-planningsmotor houdt nog niet automatisch rekening met werkelijk gepubliceerde weekendhistoriek, uren over meerdere maanden, volledige vaste werk-/rustcycli over de maandgrens, locatieverplaatsingstijden, bijzondere taaktoewijzingen of officiële sectorregels. Langdurige optimalisaties lopen nog in het Streamlit-proces en zijn geen afzonderlijke achtergrondtaken. Er is nog geen inzet voor echte personeelsgegevens toegestaan; authenticatie, gegevensbeheer en privacy moeten voor productie apart beoordeeld worden.

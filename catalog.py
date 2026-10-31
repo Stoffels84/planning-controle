@@ -9,6 +9,7 @@ from datetime import date, datetime, time, timedelta
 import re
 
 from demo_data import CATEGORIES
+from policy_v06 import validate_v06_employee, validate_v06_settings
 
 TIME_RE = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
 
@@ -30,6 +31,13 @@ def profile(employee: dict) -> dict:
     result.setdefault("max_category_run", {})
     result.setdefault("blocked_transitions", [])
     result.setdefault("active", True)
+    result.setdefault("max_month_categories", {})
+    result.setdefault("target_month_categories", {})
+    result.setdefault("max_weekend_days", None)
+    result.setdefault("max_worked_weekends", None)
+    result.setdefault("protected_weekends", [])
+    result.setdefault("historic_weekend_days", 0)
+    result.setdefault("opening_hour_balance", 0.0)
     return result
 
 
@@ -51,7 +59,10 @@ def new_employee(identifier: str, name: str, team: str, contract_percent: int, m
         "rest_mode": "automatic", "fixed_rest_weekdays": [], "fixed_rest_dates": [],
         "blocked_categories": [], "blocked_shifts": [],
         "blocked_weekdays": [], "blocked_periods": [], "preferred_category": "Geen",
-        "active": True,
+        "max_month_categories": {}, "target_month_categories": {},
+        "max_weekend_days": None, "max_worked_weekends": None,
+        "protected_weekends": [], "historic_weekend_days": 0,
+        "opening_hour_balance": 0.0, "active": True,
     }
 
 
@@ -91,6 +102,9 @@ def settings_with_defaults(settings: dict) -> dict:
     result.setdefault("blocked_transitions", [])
     result.setdefault("max_category_run", {})  # maximum per categorie; leeg = onbeperkt
     result.setdefault("hours_weight", 0)  # standaard uit; te plannen uren = zacht doel
+    result.setdefault("max_month_categories", {})
+    result.setdefault("max_weekend_days", None)
+    result.setdefault("use_opening_balance", False)  # alleen simulatie
     return result
 
 
@@ -112,6 +126,7 @@ def validate_schedule_settings(settings: dict) -> list[str]:
     if not isinstance(s["blocked_transitions"], list) or not set(s["blocked_transitions"]).issubset(known_transitions()):
         errors.append("Ongeldige verboden dienstovergangen.")
     errors.extend(validate_category_run(s["max_category_run"], "Algemeen"))
+    errors.extend(validate_v06_settings(s))
     return errors
 
 
@@ -178,6 +193,7 @@ def validate_employee(employee: dict, known_shifts: set[str]) -> list[str]:
     if e["preferred_category"] not in (*CATEGORIES, "Geen"):
         errors.append(f"Controleur {key}: ongeldige voorkeurscategorie.")
     errors.extend(f"Controleur {key}: {x}" for x in validate_periods(e["blocked_periods"]))
+    errors.extend(validate_v06_employee(e))
     return errors
 
 

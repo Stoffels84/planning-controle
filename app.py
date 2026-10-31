@@ -16,8 +16,9 @@ from extras import (PREFERENCE_TYPES, CREDIT_TYPES, REST_MODES, preference_type,
                     preference_identity, preference_description, summarize_hours)
 import store
 import catalog
+from policy_v06 import weekend_start_dates, hours_overview, service_overview
 
-st.set_page_config(page_title="Controleursplanning | v0.5", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.6", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -140,9 +141,12 @@ def plan_excel(plan, state: dict) -> bytes:
         pd.DataFrame(plan.assignments).to_excel(writer, index=False, sheet_name="Toewijzingen")
         pd.DataFrame(plan.open_positions).to_excel(writer, index=False, sheet_name="Open plaatsen")
         pd.DataFrame([plan.summary]).to_excel(writer, index=False, sheet_name="Samenvatting")
-        pd.DataFrame(summarize_hours(state["employees"], plan.assignments,
-                                     state.get("hour_credits", []))).to_excel(
-                                         writer, index=False, sheet_name="Urenoverzicht")
+        pd.DataFrame(hours_overview(state["employees"], plan.assignments,
+                                    state.get("hour_credits", []),
+                                    catalog.settings_with_defaults(state["settings"])["use_opening_balance"])).to_excel(
+                                        writer, index=False, sheet_name="Urenoverzicht test")
+        pd.DataFrame(service_overview(state["employees"], plan.assignments)).to_excel(
+            writer, index=False, sheet_name="Dienstverdeling")
     return buffer.getvalue()
 
 
@@ -253,7 +257,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.5 • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.6 • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -290,7 +294,7 @@ with st.sidebar:
     st.divider()
     st.caption("Niet gekoppeld aan systemen van De Lijn.")
 
-screens = (["Overzicht", "Controleurs", "Diensten", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Planning"]
+screens = (["Overzicht", "Controleurs", "Diensten", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Weekend en maandgrenzen", "Planning"]
            if is_manager else ["Mijn planning", "Mijn voorkeuren"])
 if PERSISTENT and current_user["role"] == "admin":
     screens += ["Accounts", "Historiek"]
@@ -316,7 +320,7 @@ if screen == "Overzicht":
 - Met OR-Tools een maandplanning berekenen, rekening houdend met beschikbare basisregels.
 - Een gedeeltelijke planning met openstaande dienstplaatsen tonen en naar Excel exporteren.
 
-**In v0.5:** vaste rustdagen per profiel, zes soorten zachte voorkeuren en testurenoverzicht. **In v0.4:** algemene en individuele dienstreeksen, dienstovergangen, aanvullende rustregels en zachte maandstreefuren. **In v0.3:** uitgebreid controleurs- en dienstenbeheer met team, tijdelijke blokkeringen en begin-/eindlocatie. Sinds v0.2: aanmelden met personeelsnummer, afzonderlijke rollen, gedeelde PostgreSQL-gegevens, auditlog en conceptplanning/publicatie in testmodus. Zonder ingestelde DATABASE_URL blijft de oude demomodus beschikbaar.
+**In v0.6:** weekendbescherming, instelbare weekend-/maandmaxima, streefaantallen per categorie en een proefberekening van urensaldo. **In v0.5:** vaste rustdagen per profiel, zes soorten zachte voorkeuren en testurenoverzicht. **In v0.4:** algemene en individuele dienstreeksen, dienstovergangen, aanvullende rustregels en zachte maandstreefuren. **In v0.3:** uitgebreid controleurs- en dienstenbeheer met team, tijdelijke blokkeringen en begin-/eindlocatie. Sinds v0.2: aanmelden met personeelsnummer, afzonderlijke rollen, gedeelde PostgreSQL-gegevens, auditlog en conceptplanning/publicatie in testmodus. Zonder ingestelde DATABASE_URL blijft de oude demomodus beschikbaar.
 
 **Nog niet gebouwd:** ruilaanvragen, taakbeheer, goedkeuringsstromen, wettelijke validatie, teams, controles over maandgrenzen en automatische back-ups. Deze onderdelen volgen in latere versies.""")
 
@@ -660,8 +664,10 @@ elif screen == "Uren en activiteiten":
             if saved_plan["revision"] != st.session_state.workspace_revision:
                 st.warning("Het beschikbare rooster is gebaseerd op verouderde invoergegevens; bereken opnieuw.")
     if current_plan:
-        st.dataframe(pd.DataFrame(summarize_hours(data["employees"], current_plan.assignments,
-                                                data.get("hour_credits", []))), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(hours_overview(data["employees"], current_plan.assignments,
+                                 data.get("hour_credits", []),
+                                 catalog.settings_with_defaults(data["settings"])["use_opening_balance"])),
+                     hide_index=True, use_container_width=True)
     else:
         st.info("Bereken eerst een maandplanning om geplande en geregistreerde uren samen te zien.")
 
@@ -704,6 +710,112 @@ elif screen == "Planningsregels":
             })
             replace_and_rerun(state)
     st.info("Individuele uitzonderingen stel je in bij **Controleurs → Profiel en beperkingen**. Per categorie geldt de strengste maximumreeks.")
+
+elif screen == "Weekend en maandgrenzen":
+    st.subheader("Weekend- en maandgrenzen — proefregels")
+    st.warning("Dit zijn configureerbare TESTREGELS, geen door De Lijn gevalideerde arbeidstijdregels. "
+               "Historische weekenddagen en het startsaldo zijn handmatige testwaarden.")
+    cfg = catalog.settings_with_defaults(data["settings"])
+    with st.form("global_v06"):
+        st.markdown("#### Algemene harde maxima")
+        st.caption("Voor maandcategorieën betekent 0: geen algemeen maximum. Per controleur kan een strenger maximum gelden.")
+        global_cats = {}
+        cols = st.columns(4)
+        for ix, cat in enumerate(CATEGORIES):
+            with cols[ix]:
+                global_cats[cat] = st.number_input("Maximum " + cat + " / maand", 0, 31,
+                    int(cfg["max_month_categories"].get(cat, 0)), key="global_month_" + cat)
+        has_weekend_limit = st.checkbox("Algemeen maximum weekenddagen activeren",
+                                        value=cfg["max_weekend_days"] is not None)
+        max_weekend = st.number_input("Maximaal aantal diensten op zaterdag/zondag (startdatum)", 0, 10,
+                                     int(cfg["max_weekend_days"] or 0), disabled=not has_weekend_limit)
+        balance_on = st.checkbox("Testsaldo meenemen bij het optimaliseren van streefuren",
+                                 value=bool(cfg["use_opening_balance"]))
+        st.caption("Als dit is ingeschakeld, vermindert een positief startsaldo de nog gewenste planuren. "
+                   "Geen automatische verwerking in officiële loon- of urenregistratie.")
+        if st.form_submit_button("Algemene grenzen bewaren"):
+            new_state = clone()
+            new_state["settings"].update({
+                "max_month_categories": {cat: int(v) for cat, v in global_cats.items() if v},
+                "max_weekend_days": int(max_weekend) if has_weekend_limit else None,
+                "use_opening_balance": bool(balance_on),
+            })
+            replace_and_rerun(new_state)
+
+    st.divider()
+    st.markdown("#### Individueel weekend- en maandprofiel")
+    if data["employees"]:
+        selected = st.selectbox("Controleur", [e["id"] for e in data["employees"]],
+                                format_func=lambda i: next(e["name"] for e in data["employees"] if e["id"] == i),
+                                key="v06_employee")
+        person = catalog.profile(next(e for e in data["employees"] if e["id"] == selected))
+        weekends = weekend_start_dates(data["year"], data["month"])
+        with st.form("individual_v06"):
+            c1, c2 = st.columns(2)
+            with c1:
+                limit_days = st.checkbox("Persoonlijk maximum weekenddagen activeren",
+                        value=person["max_weekend_days"] is not None, key="v06_days_active_"+selected)
+                weekend_days = st.number_input("Maximum weekenddagen", 0, 10,
+                        int(person["max_weekend_days"] or 0), disabled=not limit_days,
+                        key="v06_days_"+selected)
+                limit_weekends = st.checkbox("Persoonlijk maximum gewerkte weekends activeren",
+                        value=person["max_worked_weekends"] is not None, key="v06_weekends_active_"+selected)
+                weekends_count = st.number_input("Maximum volledige/deels gewerkte weekends", 0, 6,
+                        int(person["max_worked_weekends"] or 0), disabled=not limit_weekends,
+                        key="v06_weekends_"+selected)
+                protected = st.multiselect("Verplicht vrije weekends (zaterdag + zondag)", weekends,
+                         default=[x for x in person["protected_weekends"] if x in weekends],
+                         key="v06_protected_"+selected)
+            with c2:
+                history = st.number_input("Historische weekenddagen (handmatig, test)", 0, 200,
+                          int(person["historic_weekend_days"]), key="v06_history_"+selected)
+                opening = st.number_input("Startsaldo uren (test)", -80.0, 80.0,
+                          float(person["opening_hour_balance"]), step=0.5,
+                          key="v06_balance_"+selected)
+                st.caption("Startsaldoberekening alleen geactiveerd als de algemene instelling aan staat. "
+                           "Geen automatische overdracht vanuit eerdere maand.")
+            st.markdown("**Persoonlijke maxima per dienstcategorie (0 = geen eigen maximum)**")
+            cols2 = st.columns(4)
+            person_max = {}
+            for ix, cat in enumerate(CATEGORIES):
+                with cols2[ix]:
+                    person_max[cat] = st.number_input("Max. " + cat, 0, 31,
+                           int(person["max_month_categories"].get(cat, 0)),
+                           key="v06_max_"+selected+cat)
+            st.markdown("**Gewenste aantallen per categorie (zacht; leeg = geen streefwaarde)**")
+            cols3 = st.columns(4)
+            person_targets = {}
+            for ix, cat in enumerate(CATEGORIES):
+                with cols3[ix]:
+                    stored = person["target_month_categories"].get(cat)
+                    raw = st.text_input("Streef " + cat, value=str(stored) if stored is not None else "",
+                            help="Geef een geheel getal tussen 0 en 31, of laat leeg.",
+                            key="v06_target_"+selected+cat)
+                    person_targets[cat] = raw.strip()
+            if st.form_submit_button("Individuele instellingen bewaren"):
+                try:
+                    targets = {}
+                    for cat, raw in person_targets.items():
+                        if raw:
+                            targets[cat] = int(raw)
+                            if not 0 <= targets[cat] <= 31:
+                                raise ValueError("Streefwaarde moet 0–31 zijn.")
+                    new_state = clone()
+                    target = next(e for e in new_state["employees"] if e["id"] == selected)
+                    target.update({
+                        "max_weekend_days": int(weekend_days) if limit_days else None,
+                        "max_worked_weekends": int(weekends_count) if limit_weekends else None,
+                        "protected_weekends": sorted(set([iso for iso in person["protected_weekends"] if iso not in weekends] + list(protected))),
+                        "historic_weekend_days": int(history),
+                        "opening_hour_balance": float(opening),
+                        "max_month_categories": {cat: int(v) for cat, v in person_max.items() if v},
+                        "target_month_categories": targets,
+                    })
+                    replace_and_rerun(new_state)
+                except ValueError:
+                    st.error("Streefwaarden moeten gehele getallen zijn van 0 tot 31.")
+    st.caption("Weekendgrenzen en historische dagtellingen tellen diensten op hun startdatum. "
+               "Beschermde weekends blokkeren ook overlappende nachtdiensten.")
 
 elif screen == "Planning":
     st.subheader("Automatisch plannen met Google OR-Tools")
@@ -778,10 +890,14 @@ elif screen == "Planning":
                 if plan.open_positions:
                     st.info("Probeer de bezetting, beschikbare medewerkers, inzetbaarheidsbeperkingen en rusttijden te controleren. Het model schendt geen ingestelde harde regels.")
             with t3:
-                st.dataframe(pd.DataFrame(summarize_hours(data["employees"], plan.assignments,
-                                                      data.get("hour_credits", []))),
+                st.dataframe(pd.DataFrame(hours_overview(data["employees"], plan.assignments,
+                                       data.get("hour_credits", []),
+                                       catalog.settings_with_defaults(data["settings"])["use_opening_balance"])),
                              hide_index=True, use_container_width=True)
-                st.caption("Geplande plus geregistreerde uren; geen officiële urenverrekening.")
+                st.caption("Proefberekening van urensaldi; geen officiële urenverrekening.")
+            st.markdown("#### Dienstverdeling en weekendwerk (test)")
+            st.dataframe(pd.DataFrame(service_overview(data["employees"], plan.assignments)),
+                         hide_index=True, use_container_width=True)
             st.download_button("⬇️ Planning downloaden als Excel", data=plan_excel(plan, data),
                                file_name=f"controleursplanning_{data['year']}_{data['month']:02d}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
