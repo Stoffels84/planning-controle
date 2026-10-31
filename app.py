@@ -12,10 +12,12 @@ import streamlit as st
 
 from demo_data import CATEGORIES, WEEKDAYS, build_demo, next_month
 from planner import PlanResult, solve_month, validate_dataset
+from extras import (PREFERENCE_TYPES, CREDIT_TYPES, REST_MODES, preference_type,
+                    preference_identity, preference_description, summarize_hours)
 import store
 import catalog
 
-st.set_page_config(page_title="Controleursplanning | v0.4", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.5", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -132,12 +134,15 @@ def example_excel(year: int, month: int, rows: tuple[tuple[str, int], ...]) -> b
     return buffer.getvalue()
 
 
-def plan_excel(plan) -> bytes:
+def plan_excel(plan, state: dict) -> bytes:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         pd.DataFrame(plan.assignments).to_excel(writer, index=False, sheet_name="Toewijzingen")
         pd.DataFrame(plan.open_positions).to_excel(writer, index=False, sheet_name="Open plaatsen")
         pd.DataFrame([plan.summary]).to_excel(writer, index=False, sheet_name="Samenvatting")
+        pd.DataFrame(summarize_hours(state["employees"], plan.assignments,
+                                     state.get("hour_credits", []))).to_excel(
+                                         writer, index=False, sheet_name="Urenoverzicht")
     return buffer.getvalue()
 
 
@@ -178,6 +183,56 @@ def to_iso(value) -> str:
     return date.fromisoformat(str(value)[:10]).isoformat()
 
 
+
+def render_preferences(eid: str, scope: str) -> None:
+    """Eén formulier voor beheerder of controleur; opslagrechten in store.py."""
+    data = st.session_state.project_data
+    own = [p for p in data["preferences"] if p["employee_id"] == eid]
+    if own:
+        st.dataframe(pd.DataFrame([{"Type": PREFERENCE_TYPES[preference_type(p)],
+                                   "Details": preference_description(p), "Prioriteit": p["priority"]}
+                                  for p in own]), hide_index=True, use_container_width=True)
+    else:
+        st.info("Nog geen persoonlijke wensen geregistreerd voor deze maand.")
+    kind = st.selectbox("Soort voorkeur", list(PREFERENCE_TYPES),
+                        format_func=lambda x: PREFERENCE_TYPES[x], key="pref_kind_" + scope)
+    with st.form("pref_form_" + scope + "_" + kind):
+        pref = {"employee_id": eid, "type": kind}
+        if kind in ("free_day", "work_day"):
+            d = st.date_input("Datum", date(data["year"], data["month"], 1))
+            pref["date"] = d.isoformat()
+        elif kind == "category":
+            pref["category"] = st.selectbox("Categorie", CATEGORIES)
+            pref["direction"] = st.radio("Wens", ["prefer", "avoid"], horizontal=True,
+                                          format_func=lambda x: "Liefst" if x == "prefer" else "Vermijden")
+        elif kind == "shift":
+            pref["shift_id"] = st.selectbox("Dienstnummer", [s["id"] for s in data["shifts"]])
+            pref["direction"] = st.radio("Wens", ["prefer", "avoid"], horizontal=True,
+                                          format_func=lambda x: "Liefst" if x == "prefer" else "Vermijden")
+        elif kind == "weekly_free":
+            pref["weekday"] = st.selectbox("Weekdag", range(7), format_func=lambda x: WEEKDAYS[x])
+        elif kind == "avoid_transition":
+            pairs = [catalog.transition_code(a, b) for a in CATEGORIES for b in CATEGORIES]
+            pref["transition"] = st.selectbox("Liever niet na elkaar", pairs)
+        pref["priority"] = st.select_slider("Prioriteit", options=[1, 2, 3], value=2,
+                                              format_func=lambda x: {1: "Laag", 2: "Normaal", 3: "Hoog"}[x])
+        if st.form_submit_button("Voorkeur opslaan"):
+            state = clone()
+            state["preferences"] = [p for p in state["preferences"]
+                                    if preference_identity(p) != preference_identity(pref)]
+            state["preferences"].append(pref)
+            replace_and_rerun(state)
+    if own:
+        chosen = st.selectbox("Voorkeur intrekken", range(len(own)),
+                              format_func=lambda i: PREFERENCE_TYPES[preference_type(own[i])] + " — " + preference_description(own[i]),
+                              key="remove_pref_" + scope)
+        if st.button("Verwijder geselecteerde voorkeur", key="remove_button_" + scope):
+            state = clone()
+            key = preference_identity(own[chosen])
+            state["preferences"] = [p for p in state["preferences"] if preference_identity(p) != key]
+            replace_and_rerun(state)
+
+
 if PERSISTENT:
     try:
         loaded, revision = store.load_workspace(engine)
@@ -198,7 +253,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.4 • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.5 • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -235,7 +290,7 @@ with st.sidebar:
     st.divider()
     st.caption("Niet gekoppeld aan systemen van De Lijn.")
 
-screens = (["Overzicht", "Controleurs", "Diensten", "Maandbehoefte", "Voorkeuren", "Planningsregels", "Planning"]
+screens = (["Overzicht", "Controleurs", "Diensten", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Planning"]
            if is_manager else ["Mijn planning", "Mijn voorkeuren"])
 if PERSISTENT and current_user["role"] == "admin":
     screens += ["Accounts", "Historiek"]
@@ -261,7 +316,7 @@ if screen == "Overzicht":
 - Met OR-Tools een maandplanning berekenen, rekening houdend met beschikbare basisregels.
 - Een gedeeltelijke planning met openstaande dienstplaatsen tonen en naar Excel exporteren.
 
-**In v0.4:** algemene en individuele dienstreeksen, dienstovergangen, aanvullende rustregels en zachte maandstreefuren. **In v0.3:** uitgebreid controleurs- en dienstenbeheer met team, tijdelijke blokkeringen en begin-/eindlocatie. Sinds v0.2: aanmelden met personeelsnummer, afzonderlijke rollen, gedeelde PostgreSQL-gegevens, auditlog en conceptplanning/publicatie in testmodus. Zonder ingestelde DATABASE_URL blijft de oude demomodus beschikbaar.
+**In v0.5:** vaste rustdagen per profiel, zes soorten zachte voorkeuren en testurenoverzicht. **In v0.4:** algemene en individuele dienstreeksen, dienstovergangen, aanvullende rustregels en zachte maandstreefuren. **In v0.3:** uitgebreid controleurs- en dienstenbeheer met team, tijdelijke blokkeringen en begin-/eindlocatie. Sinds v0.2: aanmelden met personeelsnummer, afzonderlijke rollen, gedeelde PostgreSQL-gegevens, auditlog en conceptplanning/publicatie in testmodus. Zonder ingestelde DATABASE_URL blijft de oude demomodus beschikbaar.
 
 **Nog niet gebouwd:** ruilaanvragen, taakbeheer, goedkeuringsstromen, wettelijke validatie, teams, controles over maandgrenzen en automatische back-ups. Deze onderdelen volgen in latere versies.""")
 
@@ -273,10 +328,11 @@ elif screen == "Controleurs":
         "Personeelsnr": e["id"], "Naam": e["name"], "Team": e["team"],
         "Regime %": e["contract_percent"], "Max. maanduren": e["max_month_hours"],
         "Streefuren": e["target_month_hours"], "Pers. rust (uur)": e["min_rest_hours"],
+        "Rustdagenregeling": REST_MODES[e["rest_mode"]],
         "Verboden categorieën": ", ".join(e["blocked_categories"]),
         "Geblokkeerde periodes": len(e["blocked_periods"]), "Actief": e["active"]
     } for e in records]), use_container_width=True, hide_index=True)
-    tab_add, tab_edit, tab_periods = st.tabs(["Nieuwe controleur", "Profiel en beperkingen", "Tijdelijke onbeschikbaarheid"])
+    tab_add, tab_edit, tab_periods, tab_rest = st.tabs(["Nieuwe controleur", "Profiel en beperkingen", "Tijdelijke onbeschikbaarheid", "Rustdagenregeling"])
     with tab_add:
         with st.form("create_emp", clear_on_submit=True):
             id_ = st.text_input("Uniek testpersoneelsnummer", placeholder="DEMO017", max_chars=64)
@@ -394,6 +450,48 @@ elif screen == "Controleurs":
                     target = next(e for e in state["employees"] if e["id"] == selected_id)
                     target["blocked_periods"].pop(to_remove)
                     replace_and_rerun(state)
+
+
+    with tab_rest:
+        st.markdown("#### Individuele rustdagenregeling")
+        st.caption("Vast en combinatie blokkeren expliciet aangeduide datums en weekdagen. "
+                   "Automatisch legt geen extra vaste rustdagen op. Overige vrije dagen ontstaan "
+                   "door de automatische dienstverdeling; er is nog geen volledige vaste werkcyclus.")
+        chosen_rest = st.selectbox("Controleur voor rustdagen", [e["id"] for e in data["employees"]],
+                                   format_func=lambda i: next(e["name"] for e in data["employees"] if e["id"] == i),
+                                   key="rest_employee")
+        rest_employee = catalog.profile(next(e for e in data["employees"] if e["id"] == chosen_rest))
+        with st.form("rest_config"):
+            rest_mode = st.radio("Methode", list(REST_MODES),
+                                 index=list(REST_MODES).index(rest_employee["rest_mode"]),
+                                 format_func=lambda m: REST_MODES[m], horizontal=True)
+            rest_weekdays = st.multiselect("Vaste rustdagen per week", range(7),
+                                           default=rest_employee["fixed_rest_weekdays"],
+                                           format_func=lambda d: WEEKDAYS[d])
+            if st.form_submit_button("Rustdagenregeling opslaan"):
+                state = clone()
+                emp0 = next(e for e in state["employees"] if e["id"] == chosen_rest)
+                emp0["rest_mode"] = rest_mode
+                emp0["fixed_rest_weekdays"] = rest_weekdays
+                replace_and_rerun(state)
+        st.markdown("**Vaste rustdatums**")
+        rest_dates = rest_employee["fixed_rest_dates"]
+        if rest_dates:
+            st.write(", ".join(sorted(rest_dates)))
+        with st.form("rest_date_add"):
+            rest_date = st.date_input("Extra rustdatum", value=date(data["year"], data["month"], 1))
+            if st.form_submit_button("Vaste rustdatum toevoegen"):
+                state = clone()
+                target = next(e for e in state["employees"] if e["id"] == chosen_rest)
+                target["fixed_rest_dates"] = sorted(set(target.get("fixed_rest_dates", [])) | {rest_date.isoformat()})
+                replace_and_rerun(state)
+        if rest_dates:
+            del_rest = st.selectbox("Rustdatum opheffen", sorted(rest_dates))
+            if st.button("Geselecteerde rustdatum verwijderen"):
+                state = clone()
+                target = next(e for e in state["employees"] if e["id"] == chosen_rest)
+                target["fixed_rest_dates"] = [d for d in target.get("fixed_rest_dates", []) if d != del_rest]
+                replace_and_rerun(state)
 
 elif screen == "Diensten":
     st.subheader("Dienstencatalogus")
@@ -514,36 +612,58 @@ elif screen == "Maandbehoefte":
             st.error(f"Excel kon niet ingelezen worden: {exc}")
 
 elif screen == "Voorkeuren":
-    st.subheader("Zachte voorkeuren — gewenste vrije dagen")
-    st.caption("Vrijwensen zijn GEEN goedgekeurde afwezigheden. De planner mag ervan afwijken.")
-    st.dataframe(pd.DataFrame(data["preferences"]), hide_index=True, use_container_width=True)
-    with st.form("add_pref"):
-        a,b,c = st.columns(3)
-        with a:
-            eid = st.selectbox("Controleur", [e["id"] for e in data["employees"]],
-                               format_func=lambda id_: next(e["name"] for e in data["employees"] if e["id"] == id_))
-        with b:
-            wished = st.date_input("Gewenste vrije dag", value=date(data["year"], data["month"], 1))
-        with c:
-            priority = st.select_slider("Prioriteit", options=[1,2,3], value=2,
-                                        format_func=lambda x: {1:"Laag",2:"Normaal",3:"Hoog"}[x])
-        if st.form_submit_button("Voorkeur opslaan"):
-            if (wished.year, wished.month) != (data["year"], data["month"]):
-                st.error("Kies een datum binnen de huidige planningsmaand.")
+    st.subheader("Beheer van persoonlijke voorkeuren")
+    st.caption("Alle zes voorkeurtypes zijn **zachte** wensen. Ze mogen nooit verplichte bezetting, rust of inzetbaarheidsregels overrulen.")
+    if data["employees"]:
+        chosen_pref = st.selectbox("Controleur", [e["id"] for e in data["employees"]],
+                                   format_func=lambda i: next(e["name"] for e in data["employees"] if e["id"] == i))
+        render_preferences(chosen_pref, "manager")
+
+elif screen == "Uren en activiteiten":
+    st.subheader("Testregistratie van afwezigheden en bijzondere opdrachten")
+    st.warning("Uren zijn planningscredits, geen officieel uren-/loon-/overurensaldo. "
+               "Een registratie blokkeert de volledige betrokken kalenderdag voor reguliere diensten.")
+    if data.get("hour_credits"):
+        st.dataframe(pd.DataFrame(data["hour_credits"]), hide_index=True, use_container_width=True)
+    with st.form("add_hour_credit"):
+        c1, c2 = st.columns(2)
+        with c1:
+            credit_eid = st.selectbox("Controleur", [e["id"] for e in data["employees"]])
+            credit_date = st.date_input("Datum activiteit", date(data["year"], data["month"], 1))
+        with c2:
+            credit_type = st.selectbox("Type", CREDIT_TYPES)
+            credit_hours = st.number_input("Meegetelde uren", 0.0, 16.0, 7.6, step=0.1)
+        if st.form_submit_button("Activiteit registreren / bestaande vervangen"):
+            if (credit_date.year, credit_date.month) != (data["year"], data["month"]):
+                st.error("De activiteit moet in de actieve maand vallen.")
             else:
                 state = clone()
-                state["preferences"] = [p for p in state["preferences"] if (p["employee_id"], p["date"]) != (eid, wished.isoformat())]
-                state["preferences"].append({"employee_id": eid, "date": wished.isoformat(), "priority": priority})
+                state["hour_credits"] = [row for row in state.get("hour_credits", [])
+                                         if (row["employee_id"], row["date"]) != (credit_eid, credit_date.isoformat())]
+                state["hour_credits"].append({"employee_id": credit_eid, "date": credit_date.isoformat(),
+                                              "type": credit_type, "hours": float(credit_hours)})
                 replace_and_rerun(state)
-    if data["preferences"]:
-        with st.form("remove_pref"):
-            idx = st.selectbox("Vrijwens verwijderen", range(len(data["preferences"])),
-                               format_func=lambda x: f"{data['preferences'][x]['employee_id']} — {data['preferences'][x]['date']}")
-            if st.form_submit_button("Verwijderen"):
-                state = clone()
-                state["preferences"].pop(idx)
-                replace_and_rerun(state)
-    st.info("Zes voorkeurtypes zijn in het functioneel ontwerp vastgelegd. Deze eerste versie ondersteunt gewenste vrije dagen en een voorkeurscategorie; de andere volgen later.")
+    if data.get("hour_credits"):
+        index = st.selectbox("Registratie verwijderen", range(len(data["hour_credits"])),
+                             format_func=lambda i: f"{data['hour_credits'][i]['employee_id']} — {data['hour_credits'][i]['date']}")
+        if st.button("Geselecteerde activiteit verwijderen"):
+            state = clone()
+            state["hour_credits"].pop(index)
+            replace_and_rerun(state)
+    st.divider()
+    st.markdown("#### Urenoverzicht voor actieve testmaand")
+    current_plan = st.session_state.get("last_plan")
+    if PERSISTENT:
+        saved_plan = store.load_plan(engine, data["year"], data["month"])
+        if saved_plan:
+            current_plan = PlanResult(**saved_plan["payload"])
+            if saved_plan["revision"] != st.session_state.workspace_revision:
+                st.warning("Het beschikbare rooster is gebaseerd op verouderde invoergegevens; bereken opnieuw.")
+    if current_plan:
+        st.dataframe(pd.DataFrame(summarize_hours(data["employees"], current_plan.assignments,
+                                                data.get("hour_credits", []))), hide_index=True, use_container_width=True)
+    else:
+        st.info("Bereken eerst een maandplanning om geplande en geregistreerde uren samen te zien.")
 
 elif screen == "Planningsregels":
     st.subheader("Planningsregels: dienstreeksen en rusttijden")
@@ -649,7 +769,7 @@ elif screen == "Planning":
         if plan.summary.get("seconds") is not None:
             st.caption(f"Rekentijd: {plan.summary['seconds']} seconden | Solver: {plan.summary['solver']}")
         if plan.assignments or plan.open_positions:
-            t1,t2 = st.tabs(["Ingeplande diensten", "Openstaande plaatsen"])
+            t1,t2,t3 = st.tabs(["Ingeplande diensten", "Openstaande plaatsen", "Urenoverzicht (test)"])
             with t1:
                 assignments = pd.DataFrame(plan.assignments)
                 st.dataframe(assignments, use_container_width=True, hide_index=True, height=440)
@@ -657,7 +777,12 @@ elif screen == "Planning":
                 st.dataframe(pd.DataFrame(plan.open_positions), use_container_width=True, hide_index=True)
                 if plan.open_positions:
                     st.info("Probeer de bezetting, beschikbare medewerkers, inzetbaarheidsbeperkingen en rusttijden te controleren. Het model schendt geen ingestelde harde regels.")
-            st.download_button("⬇️ Planning downloaden als Excel", data=plan_excel(plan),
+            with t3:
+                st.dataframe(pd.DataFrame(summarize_hours(data["employees"], plan.assignments,
+                                                      data.get("hour_credits", []))),
+                             hide_index=True, use_container_width=True)
+                st.caption("Geplande plus geregistreerde uren; geen officiële urenverrekening.")
+            st.download_button("⬇️ Planning downloaden als Excel", data=plan_excel(plan, data),
                                file_name=f"controleursplanning_{data['year']}_{data['month']:02d}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         elif plan.summary["open"] is None:
@@ -665,35 +790,12 @@ elif screen == "Planning":
 
 
 elif screen == "Mijn voorkeuren":
-    st.subheader("Mijn voorkeuren — gewenste vrije dagen")
-    st.caption("Dit zijn zachte wensen, geen goedgekeurde verlofdagen. Het systeem kan ervan afwijken.")
+    st.subheader("Mijn persoonlijke voorkeuren")
     eid = current_user["employee_id"]
-    employee = next((e for e in data["employees"] if e["id"] == eid), None)
-    if employee is None:
-        st.error("Je account is nog niet gekoppeld aan een fictieve controleur. Vraag je testbeheerder om dit te controleren.")
+    if not any(e["id"] == eid for e in data["employees"]):
+        st.error("Je account is nog niet gekoppeld aan een fictieve controleur.")
     else:
-        my_prefs = sorted([p for p in data["preferences"] if p["employee_id"] == eid], key=lambda p: p["date"])
-        st.dataframe(pd.DataFrame(my_prefs, columns=["date", "priority"]), hide_index=True, use_container_width=True)
-        with st.form("my_preference"):
-            wished = st.date_input("Gewenste vrije dag", value=date(data["year"], data["month"], 1))
-            priority = st.select_slider("Prioriteit", options=[1, 2, 3], value=2,
-                                        format_func=lambda x: {1: "Laag", 2: "Normaal", 3: "Hoog"}[x])
-            if st.form_submit_button("Voorkeur opslaan"):
-                if (wished.year, wished.month) != (data["year"], data["month"]):
-                    st.error("Kies een dag in de huidige planningsmaand.")
-                else:
-                    updated = clone()
-                    updated["preferences"] = [p for p in updated["preferences"]
-                                              if (p["employee_id"], p["date"]) != (eid, wished.isoformat())]
-                    updated["preferences"].append({"employee_id": eid, "date": wished.isoformat(), "priority": int(priority)})
-                    replace_and_rerun(updated)
-        if my_prefs:
-            target_date = st.selectbox("Vrijwens intrekken", [p["date"] for p in my_prefs])
-            if st.button("Verwijder mijn voorkeur"):
-                updated = clone()
-                updated["preferences"] = [p for p in updated["preferences"]
-                                          if (p["employee_id"], p["date"]) != (eid, target_date)]
-                replace_and_rerun(updated)
+        render_preferences(eid, "own")
 
 elif screen == "Mijn planning":
     st.subheader("Mijn gepubliceerde maandplanning")

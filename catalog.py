@@ -1,4 +1,4 @@
-"""Veilige, achterwaarts compatibele profiel- en dienstdefinities voor v0.4.
+"""Veilige, achterwaarts compatibele profiel- en dienstdefinities voor v0.5.
 
 Alle velden leven in de bestaande Workspace.payload (JSON); geen destructieve
 PostgreSQL-migratie nodig. De solver gebruikt de relevante harde beperkingen.
@@ -16,6 +16,9 @@ TIME_RE = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
 def profile(employee: dict) -> dict:
     result = dict(employee)
     result.setdefault("team", "Demoteam")
+    result.setdefault("rest_mode", "automatic")
+    result.setdefault("fixed_rest_weekdays", [])
+    result.setdefault("fixed_rest_dates", [])
     result.setdefault("blocked_periods", [])
     result.setdefault("blocked_weekdays", [])
     result.setdefault("blocked_categories", [])
@@ -45,6 +48,7 @@ def new_employee(identifier: str, name: str, team: str, contract_percent: int, m
         "contract_percent": int(contract_percent), "max_month_hours": int(max_month_hours),
         "max_consecutive": None, "min_rest_hours": None, "target_month_hours": 0,
         "max_category_run": {}, "blocked_transitions": [],
+        "rest_mode": "automatic", "fixed_rest_weekdays": [], "fixed_rest_dates": [],
         "blocked_categories": [], "blocked_shifts": [],
         "blocked_weekdays": [], "blocked_periods": [], "preferred_category": "Geen",
         "active": True,
@@ -146,6 +150,23 @@ def validate_employee(employee: dict, known_shifts: set[str]) -> list[str]:
     if not isinstance(target, (int, float)) or isinstance(target, bool) or not 0 <= target <= hours:
         errors.append(f"Controleur {key}: streefuren moeten tussen 0 en maximum maanduren liggen.")
     errors.extend(validate_category_run(e["max_category_run"], f"Controleur {key}"))
+    if e["rest_mode"] not in ("automatic", "fixed", "mixed"):
+        errors.append(f"Controleur {key}: ongeldig rustdagenprofiel.")
+    rest_weekdays = e["fixed_rest_weekdays"]
+    if (not isinstance(rest_weekdays, list) or
+            any(type(w) is not int or not 0 <= w <= 6 for w in rest_weekdays) or
+            len(rest_weekdays) != len(set(rest_weekdays))):
+        errors.append(f"Controleur {key}: ongeldige vaste rustweekdagen.")
+    rest_dates = e["fixed_rest_dates"]
+    if not isinstance(rest_dates, list) or len(rest_dates) > 400 or len(rest_dates) != len(set(rest_dates)):
+        errors.append(f"Controleur {key}: ongeldige vaste rustdatums.")
+    else:
+        for rd in rest_dates:
+            try:
+                date.fromisoformat(rd)
+            except (TypeError, ValueError):
+                errors.append(f"Controleur {key}: ongeldige rustdatum.")
+                break
     if not isinstance(e["blocked_transitions"], list) or not set(e["blocked_transitions"]).issubset(known_transitions()):
         errors.append(f"Controleur {key}: ongeldige verboden dienstovergangen.")
     if not set(e["blocked_categories"]).issubset(CATEGORIES):

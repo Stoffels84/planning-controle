@@ -19,6 +19,7 @@ from ortools.sat.python import cp_model
 
 from catalog import (is_unavailable_during, profile, settings_with_defaults, transition_code,
                      validate_employee, validate_shift, validate_schedule_settings)
+from extras import preference_type, rest_blocked_during, validate_extras
 
 
 @dataclass
@@ -87,6 +88,7 @@ def validate_dataset(data: dict) -> list[str]:
     for p in data["preferences"]:
         if p["employee_id"] not in eids:
             errors.append(f"Voorkeur verwijst naar onbekende controleur: {p['employee_id']}.")
+    errors.extend(validate_extras(data))
     return errors
 
 
@@ -117,7 +119,10 @@ def solve_month(data: dict) -> PlanResult:
     all_assigned = []
     settings = settings_with_defaults(data["settings"])
 
-    off_pref = {(p["employee_id"], p["date"]): int(p["priority"]) for p in data["preferences"]}
+    preferences_by_employee = defaultdict(list)
+    for pref in data["preferences"]:
+        preferences_by_employee[pref["employee_id"]].append(pref)
+    credit_entries = data.get("hour_credits", [])
     for ri, req in enumerate(slots):
         sh = shifts[req["shift_id"]]
         d = date.fromisoformat(req["date"])
@@ -132,6 +137,8 @@ def solve_month(data: dict) -> PlanResult:
                 continue
             if is_unavailable_during(emp, interval_start, interval_end):
                 continue
+            if rest_blocked_during(emp, interval_start, interval_end, credit_entries):
+                continue
             var = model.new_bool_var(f"x_{ei}_{ri}")
             x[ei, ri] = var
             eligible.append(var)
@@ -140,9 +147,21 @@ def solve_month(data: dict) -> PlanResult:
             employee_vars[ei].append((ri, var))
             if d.weekday() >= 5:
                 weekend_vars[ei].append(var)
-            priority = off_pref.get((emp["id"], req["date"]), 0)
-            if priority:
-                pref_penalty_terms.append(10 * priority * var)
+            for pref in preferences_by_employee[emp["id"]]:
+                kind = preference_type(pref)
+                priority = int(pref["priority"])
+                if kind == "free_day" and pref["date"] == req["date"]:
+                    pref_penalty_terms.append(10 * priority * var)
+                elif kind == "weekly_free" and pref["weekday"] == d.weekday():
+                    pref_penalty_terms.append(10 * priority * var)
+                elif kind == "category":
+                    match = sh["category"] == pref["category"]
+                    if (pref["direction"] == "avoid" and match) or (pref["direction"] == "prefer" and not match):
+                        pref_penalty_terms.append(3 * priority * var)
+                elif kind == "shift":
+                    match = sh["id"] == pref["shift_id"]
+                    if (pref["direction"] == "avoid" and match) or (pref["direction"] == "prefer" and not match):
+                        pref_penalty_terms.append(3 * priority * var)
             preferred_cat = emp.get("preferred_category", "Geen")
             if preferred_cat not in ("Geen", sh["category"]):
                 pref_penalty_terms.append(var)
@@ -153,6 +172,13 @@ def solve_month(data: dict) -> PlanResult:
 
     for vars_today in staff_day.values():
         model.add(sum(vars_today) <= 1)
+
+    # Een gewenste werkdag is een zachte voorkeur: geen garantie op inzet.
+    for ei, emp in enumerate(employees):
+        for pref in preferences_by_employee[emp["id"]]:
+            if preference_type(pref) == "work_day":
+                assigned_that_day = sum(staff_day.get((ei, pref["date"]), []))
+                pref_penalty_terms.append(10 * int(pref["priority"]) * (1 - assigned_that_day))
 
     # Rust en opeenvolging op werkelijke tijdstippen, ook als een dienst
     # over middernacht loopt. Overgangsverboden gelden voor aansluitende
@@ -181,6 +207,15 @@ def solve_month(data: dict) -> PlanResult:
                 forbidden = True
             if forbidden:
                 model.add(va + vb <= 1)
+            if adjacent:
+                for pref in preferences_by_employee[emp["id"]]:
+                    if (preference_type(pref) == "avoid_transition"
+                            and pref["transition"] == pair):
+                        together = model.new_bool_var(f"wish_pair_{ei}_{i}_{j}_{pair}")
+                        model.add(together <= va)
+                        model.add(together <= vb)
+                        model.add(together >= va + vb - 1)
+                        pref_penalty_terms.append(10 * int(pref["priority"]) * together)
 
     first = date(int(data["year"]), int(data["month"]), 1)
     next_month = (first + timedelta(days=32)).replace(day=1)
@@ -225,13 +260,17 @@ def solve_month(data: dict) -> PlanResult:
     # verplicht minimum. Hierdoor blijft gedeeltelijke planning mogelijk.
     hours_deviations = []
     for ei, emp in enumerate(employees):
-        target = int(round(float(emp.get("target_month_hours", 0)) * 60))
-        if target <= 0:
+        credits = sum(float(c["hours"]) for c in credit_entries if c["employee_id"] == emp["id"])
+        target = int(round((float(emp.get("target_month_hours", 0)) - credits) * 60))
+        if float(emp.get("target_month_hours", 0)) <= 0:
             continue
+        # Geregistreerde uren verlagen het nog te plannen streefdoel,
+        # maar veroorzaken geen automatische wettelijke urensaldo-overdracht.
+        target = max(-15000, target)
         worked = sum(minutes_between(shifts[slots[ri]["shift_id"]]["start"],
                                      shifts[slots[ri]["shift_id"]]["end"]) * var
                      for ri, var in employee_vars[ei])
-        deviation = model.new_int_var(0, 15000, f"hours_deviation_{ei}")
+        deviation = model.new_int_var(0, 60000, f"hours_deviation_{ei}")
         model.add_abs_equality(deviation, worked - target)
         hours_deviations.append(deviation)
     total_weekends = sum(v for vals in weekend_vars.values() for v in vals)
@@ -246,9 +285,12 @@ def solve_month(data: dict) -> PlanResult:
     pref_weight = int(settings["preference_weight"])
     fair_weight = int(settings["fairness_weight"])
     hours_weight = int(settings["hours_weight"])
-    covering_cost = (1 + pref_weight * (31 * needed)
+    # Voor dekking voorrang op ALLE zachte voorkeuren: ruime bovengrens
+    # op gewenste werkdagen, categorieën, diensten en overgangswensen.
+    preference_bound = 30 * max(1, len(data["preferences"])) * max(1, needed) + needed
+    covering_cost = (1 + pref_weight * preference_bound
                      + fair_weight * (2 * staff_count * staff_count * needed)
-                     + hours_weight * (15000 * staff_count))
+                     + hours_weight * (60000 * staff_count))
     model.minimize(covering_cost * sum(vacancy.values())
                    + pref_weight * sum(pref_penalty_terms)
                    + fair_weight * sum(fairness)
