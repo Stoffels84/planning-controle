@@ -1710,7 +1710,11 @@ elif screen == "Mijn verlofaanvragen":
     if requests:
         st.dataframe(pd.DataFrame([{
             "Nummer": r["id"], "Van": r["start_date"], "Tot": r["end_date"],
-            "Status": STATUS_LABELS[r["status"]],
+            "Status": ("Goedgekeurd (deels ingetrokken)" if r["status"] == "approved" and
+                       len(r["remaining_dates"]) <
+                       (date.fromisoformat(r["end_date"]) - date.fromisoformat(r["start_date"])).days + 1
+                       else STATUS_LABELS[r["status"]]),
+            "Resterende dagen": ", ".join(date.fromisoformat(d).strftime("%d/%m") for d in r["remaining_dates"]) if r["remaining_dates"] else "—",
             "Testuren/dag": r["hours_per_day"], "Beslist door": r["decided_by"] or "—"
         } for r in requests]), hide_index=True, use_container_width=True)
     else:
@@ -1749,34 +1753,40 @@ elif screen == "Mijn verlofaanvragen":
     cancellation_rows = store.list_leave_cancellations(engine, eid)
     pending_cancel_ids = {r["leave_request_id"] for r in cancellation_rows if r["status"] == "pending"}
     cancellable = [r for r in approved_requests if r["id"] not in pending_cancel_ids]
-    st.markdown("#### Goedgekeurd verlof intrekken")
-    st.caption("Een goedgekeurd verlof kun je niet rechtstreeks verwijderen. Vraag een intrekking aan; "
-               "de beheerder of planner moet die eerst goedkeuren. Tot die tijd blijft het verlof geblokkeerd.")
+    st.markdown("#### Goedgekeurd verlof gedeeltelijk of volledig intrekken")
+    st.caption("Selecteer de dagen die je wilt intrekken. De beheerder moet je verzoek goedkeuren. "
+               "Alle overige goedgekeurde verlofdagen blijven geblokkeerd en een gepubliceerd rooster wijzigt niet automatisch.")
     if cancellable:
-        with st.form("leave_cancel_request_v0181"):
-            cancel_id = st.selectbox("Welk goedgekeurd verlof wil je intrekken?",
-                                     [r["id"] for r in cancellable],
-                                     format_func=lambda i: next(
-                                         f"#{r['id']} • {r['start_date']} t/m {r['end_date']}"
-                                         for r in cancellable if r["id"] == i))
+        cancel_id = st.selectbox("Goedgekeurd verlof", [r["id"] for r in cancellable],
+                                 format_func=lambda i: next(
+                                     f"#{r['id']} • {r['start_date']} t/m {r['end_date']} "
+                                     f"({len(r['remaining_dates'])} dagen beschikbaar)"
+                                     for r in cancellable if r["id"] == i),
+                                 key="cancel_select_v020")
+        selected_leave = next(r for r in cancellable if r["id"] == cancel_id)
+        remaining = [date.fromisoformat(d) for d in selected_leave["remaining_dates"]]
+        with st.form(f"leave_cancel_request_v020_{cancel_id}"):
+            selected_dates = st.multiselect("Welke dagen wil je intrekken?",
+                                            options=remaining, default=remaining,
+                                            format_func=lambda d: d.strftime("%d/%m/%Y"))
             reason = st.text_area("Reden voor de intrekking", max_chars=400,
-                                  placeholder="Bijvoorbeeld: mijn verlof is niet langer nodig")
+                                  placeholder="Bijvoorbeeld: mijn verlof is voor deze dagen niet nodig")
             if st.form_submit_button("Intrekking aanvragen"):
                 try:
-                    store.request_leave_cancellation(engine, cancel_id, eid, reason)
+                    store.request_leave_cancellation(engine, cancel_id, eid, reason, days=selected_dates)
                     st.session_state.leave_notice_v010 = "Intrekkingsverzoek verzonden naar de beheerder."
                     st.rerun()
                 except (ValueError, store.ConflictError) as exc:
                     st.error(str(exc))
     elif approved_requests:
-        st.info("Voor je goedgekeurde verlof is al een intrekkingsverzoek ingediend.")
+        st.info("Voor je goedgekeurde verlof staat al een intrekkingsverzoek open.")
     if cancellation_rows:
         st.markdown("**Mijn intrekkingsverzoeken**")
         cancel_status = {"pending": "In behandeling", "approved": "Goedgekeurd",
                          "rejected": "Afgewezen"}
         st.dataframe(pd.DataFrame([{
             "Verzoek": r["id"], "Verlof": r["leave_request_id"],
-            "Van": r["start_date"], "Tot": r["end_date"],
+            "Geselecteerde dagen": ", ".join(date.fromisoformat(d).strftime("%d/%m") for d in r["selected_dates"]),
             "Status": cancel_status.get(r["status"], r["status"]),
             "Beslist door": r["decided_by"] or "—"
         } for r in cancellation_rows]), hide_index=True, use_container_width=True)
@@ -1791,7 +1801,12 @@ elif screen == "Verlofaanvragen beheren":
         employee_names = {e["id"]: e["name"] for e in data["employees"]}
         st.dataframe(pd.DataFrame([{
             "Nummer": r["id"], "Controleur": employee_names.get(r["employee_id"], r["employee_id"]),
-            "Van": r["start_date"], "Tot": r["end_date"], "Status": STATUS_LABELS[r["status"]],
+            "Van": r["start_date"], "Tot": r["end_date"],
+            "Status": ("Goedgekeurd (deels ingetrokken)" if r["status"] == "approved" and
+                       len(r["remaining_dates"]) <
+                       (date.fromisoformat(r["end_date"]) - date.fromisoformat(r["start_date"])).days + 1
+                       else STATUS_LABELS[r["status"]]),
+            "Resterende dagen": ", ".join(date.fromisoformat(d).strftime("%d/%m") for d in r["remaining_dates"]) if r["remaining_dates"] else "—",
             "Testuren/dag": r["hours_per_day"], "Beslist door": r["decided_by"] or "—"
         } for r in rows]), hide_index=True, use_container_width=True)
         pending = [r for r in rows if r["status"] == "pending"]
@@ -1820,14 +1835,16 @@ elif screen == "Verlofaanvragen beheren":
             st.success("Geen openstaande aanvragen.")
     else:
         st.info("Er zijn nog geen aanvragen ingediend.")
-    st.markdown("#### Goedgekeurd verlof intrekken")
+    st.markdown("#### Goedgekeurd verlof geheel of gedeeltelijk intrekken")
     cancels = store.list_leave_cancellations(engine, current_user["employee_id"])
     pending_cancels = [r for r in cancels if r["status"] == "pending"]
     if pending_cancels:
         st.dataframe(pd.DataFrame([{
             "Verzoek": r["id"], "Verlof": r["leave_request_id"],
             "Controleur": r["employee_id"], "Van": r["start_date"],
-            "Tot": r["end_date"], "Reden": r["reason"]
+            "Tot": r["end_date"],
+            "In te trekken dagen": ", ".join(r["selected_dates"]),
+            "Reden": r["reason"]
         } for r in pending_cancels]), hide_index=True, use_container_width=True)
         target_cancel = st.selectbox("Intrekkingsverzoek behandelen",
                                       [r["id"] for r in pending_cancels],
@@ -1853,22 +1870,31 @@ elif screen == "Verlofaanvragen beheren":
     st.markdown("**Rechtstreeks intrekken door beheerder/planner**")
     st.caption("Gebruik dit uitsluitend wanneer de controleur de intrekking buiten de webapp gevraagd heeft. "
                "De reden en je beslissing worden geregistreerd.")
-    approved_leave_rows = [r for r in rows if r["status"] == "approved"]
+    pending_leave_ids = {r["leave_request_id"] for r in pending_cancels}
+    approved_leave_rows = [r for r in rows if r["status"] == "approved"
+                           and r["id"] not in pending_leave_ids]
     if approved_leave_rows:
-        with st.form("manager_revoke_leave_v0181"):
-            selected_leave = st.selectbox("Goedgekeurde verlofaanvraag",
-                                          [r["id"] for r in approved_leave_rows],
-                                          format_func=lambda i: next(
-                                              f"#{r['id']} • {r['employee_id']} • {r['start_date']} t/m {r['end_date']}"
-                                              for r in approved_leave_rows if r["id"] == i))
+        selected_leave = st.selectbox("Goedgekeurde verlofaanvraag",
+                                      [r["id"] for r in approved_leave_rows],
+                                      format_func=lambda i: next(
+                                          f"#{r['id']} • {r['employee_id']} • {r['start_date']} t/m {r['end_date']}"
+                                          for r in approved_leave_rows if r["id"] == i),
+                                      key="manager_leave_select_v020")
+        selected_row = next(r for r in approved_leave_rows if r["id"] == selected_leave)
+        remaining = [date.fromisoformat(d) for d in selected_row["remaining_dates"]]
+        with st.form(f"manager_revoke_leave_v020_{selected_leave}"):
+            selected_dates = st.multiselect("Welke goedgekeurde dagen intrekken?",
+                                            options=remaining, default=remaining,
+                                            format_func=lambda d: d.strftime("%d/%m/%Y"))
             admin_reason = st.text_area("Reden / verwijzing naar verzoek controleur", max_chars=400)
             confirm_cancel = st.checkbox("Ik bevestig dat de betrokken controleur om deze intrekking heeft gevraagd.")
-            if st.form_submit_button("Goedgekeurd verlof intrekken", disabled=not confirm_cancel):
+            if st.form_submit_button("Geselecteerde verlofdagen intrekken", disabled=not confirm_cancel):
                 try:
                     store.revoke_approved_leave(engine, selected_leave,
-                                               current_user["employee_id"], admin_reason)
+                                               current_user["employee_id"], admin_reason,
+                                               days=selected_dates)
                     st.session_state.leave_manager_notice_v010 = (
-                        "Verlof ingetrokken en blokkering verwijderd. Controleer en publiceer de maand opnieuw.")
+                        "Geselecteerde verlofdagen vrijgegeven. Controleer en publiceer de maand opnieuw.")
                     st.rerun()
                 except (ValueError, store.ConflictError) as exc:
                     st.error(str(exc))

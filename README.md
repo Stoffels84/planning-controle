@@ -1,3 +1,48 @@
+# Controleursplanning v0.20 — gedeeltelijke intrekking van goedgekeurd verlof
+
+> **Uitsluitend fictieve testgegevens.** Dit is een prototype, geen goedgekeurde toepassing voor echte personeelsgegevens of officiële verlofrechten. De arbeidsregels en beveiliging zijn nog niet volledig juridisch/operationeel gevalideerd.
+
+## Nieuw ten opzichte van werkende v0.19.2
+
+Bij een goedgekeurde meerdaagse verlofaanvraag kan de controleur **één of meer specifieke dagen** laten intrekken in plaats van verplicht de volledige aanvraag te laten vervallen.
+
+- **Controleur → Mijn verlofaanvragen:** kies de oorspronkelijke goedgekeurde aanvraag, vink de **dagen die moeten vervallen** aan en vermeld een reden. Alle nog goedgekeurde dagen zijn standaard aangevinkt; verwijder de dagen die je juist wilt behouden. Tot een beheerder beslist, blijft de volledige goedgekeurde verlofblokkering ongewijzigd.
+- **Beheerder/planner → Verlofaanvragen beheren:** ziet exact welke dagen de controleur wil intrekken; kan goedkeuren of weigeren. Alleen de gekozen datumregels verdwijnen uit de maandbehoefte/afwezigheidsregistratie bij goedkeuring.
+- **Rechtstreeks door beheerder:** wanneer de controleur dit buiten de webapp vraagt, kunnen na verplichte bevestiging en reden eveneens **specifieke** goedgekeurde dagen worden vrijgegeven. Een bestaand openstaand verzoek moet via de goedkeuring daarvan afgehandeld worden.
+- **Herhaling:** voor de overige nog goedgekeurde dagen van dezelfde oorspronkelijke aanvraag kan later opnieuw een intrekkingsverzoek ingediend worden. Zolang er ten minste één goedgekeurde dag overblijft, blijft de oorspronkelijke aanvraag de status 'goedgekeurd' houden, met in de schermen het label 'deels ingetrokken'. Pas na intrekking van alle dagen wordt de oorspronkelijke aanvraag 'ingetrokken'.
+- **Historiek & rechten:** redenen, beslisser, oorspronkelijke verlofgoedkeuring, betrokken datums en persoonlijke meldingen blijven bewaard. Een controleur kan geen dagen van een collega wijzigen.
+- **Veiligheid:** bestaande goedgekeurde dagen blijven beschermd tegen handmatig wissen; afwijkende datums, dubbele intrekkingen en ontbrekende urenregistraties worden geweigerd. Oude gepubliceerde roosters wijzigen niet automatisch; na goedkeuring stijgt de maandrevisie en moet een concept opnieuw berekend en gepubliceerd worden.
+- **Compatibiliteit:** oude volledige intrekkingsverzoeken uit v0.18.1 blijven bruikbaar. De rapportagecorrectie uit v0.19.2 is behouden.
+
+## Installatie / database
+
+1. **Maak eerst een PostgreSQL-back-up** en bewaar de GitHub-commit van de werkende v0.19.2 als herstelpunt. Verwijder niets uit de database.
+2. Download `controleursplanning-github-streamlit-v020.zip`. Pak uit en upload **alle bestanden** naar de root van dezelfde private GitHub-repository.
+3. Commit de wijziging en laat Streamlit Community Cloud de app herstarten. Met name `store.py` en `app.py` zijn gewijzigd; het extra testbestand is `tests/test_v020_partial_leave.py`.
+4. **Nieuwe tabel:** `leave_cancellation_selections`. Bij appstart wordt deze via de bestaande SQLAlchemy `create_all` automatisch aangemaakt. De tabellen `leave_requests`, `leave_cancellations`, accounts en planningsversies krijgen geen kolomwijzigingen, en bestaande records worden niet gewist. De PostgreSQL-databasegebruiker moet **CREATE TABLE**-rechten hebben.
+5. Bestaande Streamlit Secrets, `DATABASE_URL`, accounts en planningsgegevens **niet aanpassen**.
+
+Terugrollen naar v0.19.2 kan via de oude GitHub-commit; verwijder de nieuwe tabel **niet** zonder een doordacht migratieplan, anders gaat de datumselectiehistoriek verloren.
+
+## Online testscenario
+
+1. Maak met **fictieve accounts** een verlofaanvraag voor bijvoorbeeld **5 t/m 9 november** en laat de beheerder deze goedkeuren. Controleer dat vijf dagen geblokkeerd zijn.
+2. Log in als controleur en open **Mijn verlofaanvragen**. Kies de aanvraag en selecteer uitsluitend **6 en 8 november** om in te trekken; vul een reden in. Verzenden moet een openstaand intrekkingsverzoek opleveren zonder de verlofblokkeringen aan te passen.
+3. Log in als planner en keur het verzoek goed. In **Uren en activiteiten** blijven uitsluitend **5, 7 en 9 november** als verlof geregistreerd. De oorspronkelijke aanvraag moet 'Goedgekeurd (deels ingetrokken)' tonen.
+4. Doe een tweede intrekkingsverzoek, bijvoorbeeld voor **7 november**. De eerder ingetrokken dagen mogen niet opnieuw selecteerbaar zijn. Na goedkeuring blijven alleen 5 en 9 november geblokkeerd.
+5. Probeer een intrekking af te wijzen; de geselecteerde dagen moeten dan geblokkeerd blijven. Controleer ook de meldingen en de zichtbaarheid voor een andere fictieve controleur.
+6. Controleer een reeds gepubliceerde planning: die blijft ongewijzigd, maar een oud concept mag na gewijzigde maandinvoer niet zonder herberekening opnieuw gepubliceerd worden.
+7. Controleer dat **Rapportage en eerlijkheid** nog goed opent en dat de eerdere `DeltaGenerator`-weergavefout niet terugkomt.
+
+## Teststatus en beperkingen
+
+- **154 lokale automatische tests geslaagd**; **9 solvermodules overgeslagen** omdat OR-Tools in de lokale omgeving ontbreekt.
+- De Streamlit-interface en het gebruik met een echte PostgreSQL-server zijn nog **niet online getest**; lokaal zijn SQLite-databasetests en Python-syntaxcontroles uitgevoerd.
+- Dit systeem behandelt **volledige kalenderdagen**; halve verlofdagen, urenrekeningen, automatische verrekening van wettelijke verlofrechten en bedrijfsvalidatie zijn nog niet aanwezig.
+- De nieuwe tabel is alleen additief; er is geen automatische verwijdering of herberekening van historische gepubliceerde roosters.
+
+---
+
 # Controleursplanning v0.19.2 — herstel weergavefout rapportage
 
 > **Uitsluitend fictieve testgegevens.** Deze update corrigeert één specifieke Streamlit-weergavefout in de rapportage. Geen wijzigingen aan database, login, verlofprocedures, solver of gepubliceerde planningen.

@@ -116,6 +116,17 @@ class LeaveCancellation(Base):
     decided_by: Mapped[str | None] = mapped_column(String(64))
 
 
+class LeaveCancellationSelection(Base):
+    """v0.20: selectie van dagen per intrekkingsverzoek; nieuwe tabel, geen wijziging van oude tabellen.
+
+    Voor oude v0.18.1-verzoeken zonder selectie betekent het verzoek 'alle resterende dagen'.
+    """
+    __tablename__ = "leave_cancellation_selections"
+    cancellation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("leave_cancellations.id"), primary_key=True)
+    days: Mapped[list] = mapped_column(JSON, nullable=False)
+
+
 class SwapRequest(Base):
     """Een ruilvoorstel gekoppeld aan exact één gepubliceerde planversie."""
     __tablename__ = "swap_requests"
@@ -501,13 +512,89 @@ def load_month_workspace(engine, year: int, month: int) -> tuple[dict, int]:
         return merge_shared(row.payload, shared.payload), row.revision
 
 
+def _remaining_approved_leave_days(s, leave: LeaveRequest) -> list[date]:
+    """Datumset die nog goedgekeurd/geblokkeerd is, na eerdere deelintrekkingen.
+
+    Oude intrekkingen zonder selectierij zijn volledig; bij status 'cancelled'
+    zijn er daarom altijd nul resterende dagen.
+    """
+    if leave.status != "approved":
+        return []
+    original = leave_days(leave.start_date, leave.end_date,
+                          leave.start_date.year, leave.start_date.month)
+    approved_cancels = s.scalars(select(LeaveCancellation).where(
+        LeaveCancellation.leave_request_id == leave.id,
+        LeaveCancellation.status == "approved")).all()
+    removed: set[str] = set()
+    for cancellation in approved_cancels:
+        selection = s.get(LeaveCancellationSelection, cancellation.id)
+        if selection is None:
+            # Historische v0.18.1-volledige intrekkingen horen bij
+            # leave.status == 'cancelled'; 'approved' duidt op inconsistente data.
+            raise ValueError("De bestaande verlofintrekkingshistoriek is inconsistent.")
+        removed.update(selection.days)
+    return [d for d in original if d.isoformat() not in removed]
+
+
+def _validate_leave_cancel_days(leave: LeaveRequest, remaining: list[date],
+                                days: list[date] | None) -> list[date]:
+    """Server-side selectie: exact, uniek, binnen goedgekeurde resterende dagen."""
+    if not remaining:
+        raise ValueError("Er zijn geen goedgekeurde verlofdagen meer om in te trekken.")
+    if days is None:
+        return list(remaining)
+    if not isinstance(days, (list, tuple)) or not days:
+        raise ValueError("Selecteer minstens één verlofdag om in te trekken.")
+    if any(type(d) is not date for d in days):
+        raise ValueError("De geselecteerde verlofdatums zijn ongeldig.")
+    if len(set(days)) != len(days):
+        raise ValueError("Eenzelfde verlofdag mag maar één keer worden geselecteerd.")
+    if not set(days).issubset(set(remaining)):
+        raise ValueError("De gekozen datum valt niet binnen het nog goedgekeurde verlof.")
+    return sorted(days)
+
+
+def _cancellation_selected_days(s, request: LeaveCancellation,
+                                leave: LeaveRequest) -> list[date]:
+    selection = s.get(LeaveCancellationSelection, request.id)
+    if selection is None:
+        # Bestaande verzoeken uit v0.18.1: volledige intrekking.
+        return _remaining_approved_leave_days(s, leave)
+    try:
+        return [date.fromisoformat(d) for d in selection.days]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Opgeslagen verlofdatums zijn ongeldig; laat dit controleren.") from exc
+
+
+def _save_cancel_selection(s, request_id: int, selected: list[date]) -> None:
+    s.add(LeaveCancellationSelection(cancellation_id=request_id,
+                                     days=[d.isoformat() for d in selected]))
+
+
+def _visible_cancel_days(s, cancel: LeaveCancellation, leave: LeaveRequest) -> list[str]:
+    selection = s.get(LeaveCancellationSelection, cancel.id)
+    if selection is not None:
+        return list(selection.days)
+    if cancel.status == "pending":
+        return [d.isoformat() for d in _remaining_approved_leave_days(s, leave)]
+    return [d.isoformat() for d in leave_days(leave.start_date, leave.end_date,
+                                              leave.start_date.year, leave.start_date.month)]
+
+
+def _leave_dict_with_remaining(s, row: LeaveRequest) -> dict:
+    result = _leave_dict(row)
+    result["remaining_dates"] = [d.isoformat() for d in _remaining_approved_leave_days(s, row)]
+    return result
+
+
 def _approved_leave_protected(s, payload: dict) -> None:
     year, month = int(payload["year"]), int(payload["month"])
     for leave in s.scalars(select(LeaveRequest).where(LeaveRequest.status == "approved")).all():
         if not (leave.start_date.year <= year <= leave.end_date.year):
             continue
         approved = [absence_credit(leave.employee_id, day, leave.hours_per_day)
-                    for day in leave_days(leave.start_date, leave.end_date, year, month)]
+                    for day in _remaining_approved_leave_days(s, leave)
+                    if (day.year, day.month) == (year, month)]
         for entry in approved:
             if entry not in payload.get("hour_credits", []):
                 raise ValueError("Een goedgekeurde verlofdag mag niet zomaar gewijzigd of gewist worden.")
@@ -604,8 +691,8 @@ def save_workspace(engine, payload: dict, expected_revision: int, actor: str, ac
             if (leave.start_date.year, leave.start_date.month) != (int(payload["year"]), int(payload["month"])):
                 continue
             approved = [absence_credit(leave.employee_id, day, leave.hours_per_day)
-                        for day in leave_days(leave.start_date, leave.end_date,
-                                              int(payload["year"]), int(payload["month"]))]
+                        for day in _remaining_approved_leave_days(s, leave)
+                        if (day.year, day.month) == (int(payload["year"]), int(payload["month"]))]
             for entry in approved:
                 if entry not in payload.get("hour_credits", []):
                     raise ValueError("Een goedgekeurde verlofdag mag niet zomaar gewijzigd of gewist worden.")
@@ -944,8 +1031,10 @@ def request_leave(engine, employee_id: str, start: date, end: date) -> int:
         for other in s.scalars(select(LeaveRequest).where(
                 LeaveRequest.employee_id == employee_id,
                 LeaveRequest.status.in_(("pending", "approved")))).all():
-            if start <= other.end_date and other.start_date <= end:
-                raise ValueError("Er bestaat al een openstaande of goedgekeurde aanvraag voor deze dagen.")
+            if other.status == "pending" and start <= other.end_date and other.start_date <= end:
+                raise ValueError("Er bestaat al een openstaande aanvraag voor deze dagen.")
+            if other.status == "approved" and set(dates) & set(_remaining_approved_leave_days(s, other)):
+                raise ValueError("Er bestaat al goedgekeurd verlof voor deze dagen.")
         existing = {(c["employee_id"], c["date"]) for c in w.payload.get("hour_credits", [])}
         if any((employee_id, day.isoformat()) in existing for day in dates):
             raise ValueError("Op één of meer aangevraagde dagen staat al een geregistreerde afwezigheid.")
@@ -971,7 +1060,7 @@ def list_leave_requests(engine, actor: str) -> list[dict]:
             query = query.where(LeaveRequest.employee_id == actor)
         elif who.role not in ("admin", "planner"):
             raise ValueError("Geen toegangsrechten.")
-        return [_leave_dict(r) for r in s.scalars(query).all()]
+        return [_leave_dict_with_remaining(s, r) for r in s.scalars(query).all()]
 
 
 def withdraw_leave_request(engine, request_id: int, actor: str) -> None:
@@ -1068,7 +1157,8 @@ def list_leave_cancellations(engine, actor: str) -> list[dict]:
         return [{**_cancellation_dict(cancel),
                  "employee_id": leave.employee_id,
                  "start_date": leave.start_date.isoformat(),
-                 "end_date": leave.end_date.isoformat()}
+                 "end_date": leave.end_date.isoformat(),
+                 "selected_dates": _visible_cancel_days(s, cancel, leave)}
                 for cancel, leave in s.execute(q).all()]
 
 
@@ -1079,8 +1169,12 @@ def _validate_cancel_reason(reason: str) -> str:
     return reason
 
 
-def request_leave_cancellation(engine, request_id: int, actor: str, reason: str) -> int:
-    """Aanvrager vraagt intrekking; goedgekeurd verlof blijft intussen geblokkeerd."""
+def request_leave_cancellation(engine, request_id: int, actor: str, reason: str,
+                               days: list[date] | None = None) -> int:
+    """Controleur verzoekt intrekking van een selectie, zonder directe gevolgen voor de planning.
+
+    days=None blijft achterwaarts compatibel: alle nog goedgekeurde dagen.
+    """
     reason = _validate_cancel_reason(reason)
     with session_factory(engine).begin() as s:
         who = s.get(Account, actor)
@@ -1089,6 +1183,8 @@ def request_leave_cancellation(engine, request_id: int, actor: str, reason: str)
             raise ValueError("Alleen de betrokken controleur kan een intrekking aanvragen.")
         if leave.status != "approved":
             raise ValueError("Alleen goedgekeurd verlof kan via dit verzoek worden ingetrokken.")
+        remaining = _remaining_approved_leave_days(s, leave)
+        selected = _validate_leave_cancel_days(leave, remaining, days)
         pending = s.scalar(select(LeaveCancellation.id).where(
             LeaveCancellation.leave_request_id == request_id,
             LeaveCancellation.status == "pending").limit(1))
@@ -1098,27 +1194,41 @@ def request_leave_cancellation(engine, request_id: int, actor: str, reason: str)
                                 reason=reason, status="pending", created_at=now())
         s.add(row)
         s.flush()
+        _save_cancel_selection(s, row.id, selected)
         _notify_managers(s, f"leave-cancel-pending:{row.id}", "Verzoek om verlof in te trekken",
-                         f"Intrekkingsverzoek #{row.id} voor goedgekeurd verlof #{request_id} wacht op beslissing.")
-        _audit(s, actor, f"Intrekking van goedgekeurd verlof #{request_id} aangevraagd (verzoek #{row.id})")
+                         f"Intrekkingsverzoek #{row.id} voor {len(selected)} dag(en) van "
+                         f"goedgekeurd verlof #{request_id} wacht op beslissing.")
+        _audit(s, actor, f"Intrekking van {len(selected)} verlofdag(en) uit #{request_id} "
+                         f"aangevraagd (verzoek #{row.id})")
         return row.id
 
 
-def _apply_approved_leave_cancellation(s, leave: LeaveRequest, actor: str) -> int:
-    """Wijzig alleen de bij deze goedkeuring geschreven testcredits, in dezelfde transactie."""
-    w = _period_workspace(s, leave.start_date.year, leave.start_date.month)
+def _apply_approved_leave_cancellation(s, leave: LeaveRequest, actor: str,
+                                       selected: list[date]) -> int:
+    """Atomair uitsluitend de expliciet geselecteerde, nog actieve verlofdagen verwijderen."""
+    # Lock de maandrij mee om gelijktijdige wijzigingen aan afwezigheden
+    # op PostgreSQL niet verloren te laten gaan.
+    w = s.scalar(select(MonthWorkspace).where(
+        MonthWorkspace.period == period_key(leave.start_date.year, leave.start_date.month)
+    ).with_for_update())
+    if w is None:
+        w = s.scalar(select(Workspace).where(Workspace.id == 1).with_for_update())
+        if w and (w.payload["year"], w.payload["month"]) != (
+                leave.start_date.year, leave.start_date.month):
+            w = None
     if w is None:
         raise ValueError("De bijbehorende maandplanning bestaat niet meer.")
     if leave.status != "approved":
         raise ValueError("Het verlof is niet langer goedgekeurd.")
+    remaining = _remaining_approved_leave_days(s, leave)
+    selected = _validate_leave_cancel_days(leave, remaining, selected)
     state = deepcopy(w.payload)
     credits = state.get("hour_credits", [])
     if not isinstance(credits, list):
         raise ValueError("De afwezigheden van deze maand zijn ongeldig.")
     expected = [absence_credit(leave.employee_id, day, float(leave.hours_per_day))
-                for day in leave_days(leave.start_date, leave.end_date,
-                                      leave.start_date.year, leave.start_date.month)]
-    # Test volledig vóór verwijderen, om gedeeltelijke wijzigingen te voorkomen.
+                for day in selected]
+    # Eerst de volledige selectie controleren, dan pas de payload wijzigen.
     available = deepcopy(credits)
     for entry in expected:
         if entry not in available:
@@ -1127,8 +1237,10 @@ def _apply_approved_leave_cancellation(s, leave: LeaveRequest, actor: str) -> in
     state["hour_credits"] = available
     w.payload = state
     w.revision += 1
-    leave.status = "cancelled"
-    _audit(s, actor, f"Goedgekeurd verlof #{leave.id} ingetrokken; maandrevisie {w.revision}")
+    if set(selected) == set(remaining):
+        leave.status = "cancelled"
+    _audit(s, actor, f"{len(selected)} verlofdag(en) uit goedgekeurd verlof #{leave.id} "
+                     f"ingetrokken; maandrevisie {w.revision}")
     return w.revision
 
 
@@ -1138,23 +1250,29 @@ def decide_leave_cancellation(engine, cancellation_id: int, actor: str, approve:
         who = s.get(Account, actor)
         if not who or not who.active or who.role not in ("admin", "planner"):
             raise ValueError("Alleen beheerders of planners mogen beslissen.")
+        # Eerst de verlofrij vergrendelen, dan het verzoek (dezelfde volgorde
+        # als bij rechtstreekse intrekking door een beheerder).
+        reference = s.get(LeaveCancellation, cancellation_id)
+        if not reference or reference.status != "pending":
+            raise ValueError("Dit intrekkingsverzoek is niet meer in behandeling.")
+        leave = s.scalar(select(LeaveRequest).where(
+            LeaveRequest.id == reference.leave_request_id).with_for_update())
+        if not leave or leave.status != "approved":
+            raise ValueError("Dit verlof is niet meer goedgekeurd.")
         request = s.scalar(select(LeaveCancellation).where(
             LeaveCancellation.id == cancellation_id).with_for_update())
         if not request or request.status != "pending":
-            raise ValueError("Dit intrekkingsverzoek is niet meer in behandeling.")
-        leave = s.scalar(select(LeaveRequest).where(
-            LeaveRequest.id == request.leave_request_id).with_for_update())
-        if not leave or leave.status != "approved":
-            raise ValueError("Dit verlof is niet meer goedgekeurd.")
+            raise ValueError("Dit intrekkingsverzoek is al verwerkt.")
         revision = None
+        selected = _cancellation_selected_days(s, request, leave)
         if approve:
-            revision = _apply_approved_leave_cancellation(s, leave, actor)
+            revision = _apply_approved_leave_cancellation(s, leave, actor, selected)
         request.status = "approved" if approve else "rejected"
         request.decided_at = now()
         request.decided_by = actor
         _notice(s, leave.employee_id, f"leave-cancel-decision:{request.id}",
                 "Beslissing intrekking verlof",
-                f"Je verzoek om verlof #{leave.id} in te trekken is "
+                f"Je verzoek om {len(selected)} dag(en) van verlof #{leave.id} in te trekken is "
                 + ("goedgekeurd. Een reeds gepubliceerd rooster wordt niet automatisch gewijzigd."
                    if approve else "afgewezen. Het goedgekeurde verlof blijft behouden."))
         _audit(s, actor, f"Intrekkingsverzoek #{request.id} voor verlof #{leave.id} "
@@ -1162,8 +1280,13 @@ def decide_leave_cancellation(engine, cancellation_id: int, actor: str, approve:
         return {"id": request.id, "status": request.status, "workspace_revision": revision}
 
 
-def revoke_approved_leave(engine, request_id: int, actor: str, reason: str) -> dict:
-    """Beheerder trekt na extern verzoek zelf in; reden en beslissing worden opgeslagen."""
+def revoke_approved_leave(engine, request_id: int, actor: str, reason: str,
+                          days: list[date] | None = None) -> dict:
+    """Beheerder verwerkt een extern verzoek (geheel of een aantal dagen).
+
+    Een al openstaand verzoek wordt alleen als datzelfde verzoek verwerkt; een
+    afwijkende selectie moet via dat oorspronkelijke verzoek behandeld worden.
+    """
     reason = _validate_cancel_reason(reason)
     with session_factory(engine).begin() as s:
         who = s.get(Account, actor)
@@ -1172,27 +1295,33 @@ def revoke_approved_leave(engine, request_id: int, actor: str, reason: str) -> d
         leave = s.scalar(select(LeaveRequest).where(LeaveRequest.id == request_id).with_for_update())
         if not leave or leave.status != "approved":
             raise ValueError("Alleen goedgekeurd verlof kan ingetrokken worden.")
+        selected = _validate_leave_cancel_days(leave, _remaining_approved_leave_days(s, leave), days)
         pending = s.scalar(select(LeaveCancellation).where(
             LeaveCancellation.leave_request_id == request_id,
             LeaveCancellation.status == "pending").with_for_update())
         if pending:
-            # Een bestaand verzoek behandelen i.p.v. een tweede open verzoek maken.
             request = pending
+            requested = _cancellation_selected_days(s, request, leave)
+            if days is not None and set(requested) != set(selected):
+                raise ValueError("Behandel het bestaande intrekkingsverzoek; de geselecteerde dagen wijken af.")
+            selected = requested
         else:
             request = LeaveCancellation(leave_request_id=request_id,
                                         requested_by=actor, reason=reason,
                                         status="pending", created_at=now())
             s.add(request)
             s.flush()
-        revision = _apply_approved_leave_cancellation(s, leave, actor)
+            _save_cancel_selection(s, request.id, selected)
+        revision = _apply_approved_leave_cancellation(s, leave, actor, selected)
         request.status = "approved"
         request.decided_at = now()
         request.decided_by = actor
         _notice(s, leave.employee_id, f"leave-cancel-decision:{request.id}",
                 "Goedgekeurd verlof ingetrokken",
-                f"Je goedgekeurde verlof #{leave.id} werd door de beheerder ingetrokken. "
-                "Een reeds gepubliceerd rooster blijft ongewijzigd tot een nieuwe publicatie.")
-        _audit(s, actor, f"Rechtstreekse intrekking verlof #{leave.id}: {reason[:80]}")
+                f"{len(selected)} dag(en) van goedgekeurd verlof #{leave.id} "
+                "werden door de beheerder ingetrokken. Een gepubliceerd rooster "
+                "blijft ongewijzigd tot een nieuwe publicatie.")
+        _audit(s, actor, f"Rechtstreekse intrekking {len(selected)} dag(en) uit verlof #{leave.id}: {reason[:80]}")
         return {"id": request.id, "status": request.status, "workspace_revision": revision}
 
 
