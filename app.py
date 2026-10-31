@@ -17,8 +17,10 @@ from extras import (PREFERENCE_TYPES, CREDIT_TYPES, REST_MODES, preference_type,
 import store
 import catalog
 from policy_v06 import weekend_start_dates, hours_overview, service_overview
+from history_v07 import aggregate_history, apply_published_history
+from tasks_v07 import validate_tasks
 
-st.set_page_config(page_title="Controleursplanning | v0.6.1", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.7", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -147,6 +149,8 @@ def plan_excel(plan, state: dict) -> bytes:
                                         writer, index=False, sheet_name="Urenoverzicht test")
         pd.DataFrame(service_overview(state["employees"], plan.assignments)).to_excel(
             writer, index=False, sheet_name="Dienstverdeling")
+        pd.DataFrame(plan.task_assignments).to_excel(writer, index=False, sheet_name="Taaktoewijzingen")
+        pd.DataFrame(plan.open_tasks).to_excel(writer, index=False, sheet_name="Open taken")
     return buffer.getvalue()
 
 
@@ -257,7 +261,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.6.1 • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.7 • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -294,7 +298,7 @@ with st.sidebar:
     st.divider()
     st.caption("Niet gekoppeld aan systemen van De Lijn.")
 
-screens = (["Overzicht", "Controleurs", "Diensten", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Weekend en maandgrenzen", "Planning"]
+screens = (["Overzicht", "Controleurs", "Diensten", "Taken", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Weekend en maandgrenzen", "Planning"]
            if is_manager else ["Mijn planning", "Mijn voorkeuren"])
 if PERSISTENT and current_user["role"] == "admin":
     screens += ["Accounts", "Historiek"]
@@ -307,6 +311,7 @@ if screen == "Overzicht":
     b.metric("Dienstnummers", len(data["shifts"]))
     c.metric("Dienstplaatsen deze maand", sum(r["required"] for r in data["demand"]))
     d.metric("Vrijwensen", len(data["preferences"]))
+    st.caption(f"Takencatalogus: {len(data.get('tasks', []))} taken, {len(data.get('task_needs', []))} ingeplande taakblokken.")
     st.info("Begin bij **Controleurs** en **Diensten**. Pas daarna in **Maandbehoefte** de te plannen diensten aan en klik in **Planning** op 'Bereken planning'.")
     if "last_plan" in st.session_state:
         plan = st.session_state.last_plan
@@ -322,7 +327,9 @@ if screen == "Overzicht":
 
 **In v0.6:** weekendbescherming, instelbare weekend-/maandmaxima, streefaantallen per categorie en een proefberekening van urensaldo. **In v0.5:** vaste rustdagen per profiel, zes soorten zachte voorkeuren en testurenoverzicht. **In v0.4:** algemene en individuele dienstreeksen, dienstovergangen, aanvullende rustregels en zachte maandstreefuren. **In v0.3:** uitgebreid controleurs- en dienstenbeheer met team, tijdelijke blokkeringen en begin-/eindlocatie. Sinds v0.2: aanmelden met personeelsnummer, afzonderlijke rollen, gedeelde PostgreSQL-gegevens, auditlog en conceptplanning/publicatie in testmodus. Zonder ingestelde DATABASE_URL blijft de oude demomodus beschikbaar.
 
-**Nog niet gebouwd:** ruilaanvragen, taakbeheer, goedkeuringsstromen, wettelijke validatie, teams, controles over maandgrenzen en automatische back-ups. Deze onderdelen volgen in latere versies.""")
+**In v0.7:** taaktoewijzing binnen bestaande diensten met kwalificatiecontrole en keuze om gepubliceerde weekendhistoriek mee te nemen.
+
+**Nog niet gebouwd:** taken die een dienst vervangen of buiten een bestaande dienst vallen, ruilaanvragen, goedkeuringsstromen, wettelijke validatie, zelfstandige teamplanning, verplichte overgangsregels over maandgrenzen en automatische back-ups. Deze onderdelen volgen in latere versies.""")
 
 elif screen == "Controleurs":
     st.subheader("Controleursbeheer")
@@ -402,6 +409,13 @@ elif screen == "Controleurs":
                 all_pairs = [catalog.transition_code(a, b) for a in CATEGORIES for b in CATEGORIES]
                 blocked_pairs = st.multiselect("Verboden overgangen voor deze controleur (aaneensluitende dagen)",
                                                all_pairs, default=emp["blocked_transitions"])
+                st.markdown("**Taakbevoegdheden (v0.7)**")
+                known_quals = sorted(({t.get("qualification", "") for t in data.get("tasks", []) if t.get("qualification", "")}) | set(emp.get("qualifications", [])))
+                qualifications = st.multiselect("Behaalde taakbevoegdheden", known_quals,
+                                                default=[q for q in emp.get("qualifications", []) if q in known_quals],
+                                                help="Voeg een bevoegdheid eerst toe bij een taak in de takencatalogus.")
+                blocked_tasks = st.multiselect("Individueel uitgesloten taken", [t["id"] for t in data.get("tasks", [])],
+                                               default=emp.get("blocked_tasks", []))
                 active = st.checkbox("Controleur actief", value=bool(emp["active"]))
                 st.caption("Deze beperkingen zijn verplicht voor de solver. De voorkeur voor een dienstcategorie is een zachte wens.")
                 if st.form_submit_button("Profiel bewaren"):
@@ -416,6 +430,7 @@ elif screen == "Controleurs":
                                    "target_month_hours": int(target_hours),
                                    "max_category_run": max_runs,
                                    "blocked_transitions": blocked_pairs,
+                                   "qualifications": qualifications, "blocked_tasks": blocked_tasks,
                                    "active": active})
                     replace_and_rerun(state)
     with tab_periods:
@@ -549,6 +564,77 @@ elif screen == "Diensten":
                     state["shifts"].append(entry)
                 replace_and_rerun(state)
     st.info("Bij wijziging van de vaste bezetting passen we de behoefte voor de actieve maand aan. Eerder opgeslagen planningsversies blijven bewaard als historisch resultaat; bereken een nieuwe conceptplanning om de gewijzigde diensturen te verwerken.")
+
+elif screen == "Taken":
+    st.subheader("Takencatalogus en taakbehoefte (v0.7)")
+    st.info("In v0.7 worden **alleen taken binnen een bestaande dienst** automatisch toegewezen. "
+            "Een medewerker blijft tijdens zo'n taak meetellen voor de dienstbezetting. "
+            "Vervangende of zelfstandige taken volgen in een volgende versie.")
+    tasks = data.get("tasks", [])
+    needs = data.get("task_needs", [])
+    t1, t2 = st.tabs(["Takencatalogus", "Taken per datum"])
+    with t1:
+        if tasks:
+            st.dataframe(pd.DataFrame([{"Taakcode": t["id"], "Omschrijving": t["name"],
+                                        "Bevoegdheid": t.get("qualification", "") or "Geen",
+                                        "Actief": t.get("active", True)} for t in tasks]),
+                         hide_index=True, use_container_width=True)
+        with st.form("new_task", clear_on_submit=True):
+            tid = st.text_input("Nieuwe taakcode", max_chars=40, placeholder="ACTIE01")
+            tname = st.text_input("Omschrijving", max_chars=120, placeholder="Fictieve bijzondere controle")
+            qual = st.text_input("Vereiste bevoegdheid (leeg = geen)", max_chars=64)
+            if st.form_submit_button("Taak toevoegen"):
+                state = clone()
+                state.setdefault("tasks", []).append({"id": tid.strip(), "name": tname.strip(),
+                                                       "qualification": qual.strip(), "active": True})
+                replace_and_rerun(state)
+        if tasks:
+            to_edit = st.selectbox("Taak aanpassen", [t["id"] for t in tasks])
+            definition = next(t for t in tasks if t["id"] == to_edit)
+            with st.form("edit_task"):
+                edit_name = st.text_input("Naam", definition["name"], max_chars=120)
+                edit_qual = st.text_input("Bevoegdheid", definition.get("qualification", ""), max_chars=64)
+                edit_active = st.checkbox("Taak actief", definition.get("active", True))
+                if st.form_submit_button("Taak aanpassen"):
+                    state = clone()
+                    target = next(t for t in state["tasks"] if t["id"] == to_edit)
+                    target.update({"name": edit_name.strip(), "qualification": edit_qual.strip(),
+                                   "active": edit_active})
+                    replace_and_rerun(state)
+    with t2:
+        if needs:
+            st.dataframe(pd.DataFrame(needs), hide_index=True, use_container_width=True)
+        if not tasks or not data["demand"]:
+            st.info("Voeg eerst een taak en een dienst in de maandbehoefte toe.")
+        else:
+            with st.form("add_task_need", clear_on_submit=True):
+                date_options = sorted({r["date"] for r in data["demand"]})
+                on_date = st.selectbox("Datum", date_options)
+                shifts_today = [r["shift_id"] for r in data["demand"] if r["date"] == on_date and r["required"] > 0]
+                shid = st.selectbox("Dienstnummer", shifts_today) if shifts_today else None
+                active_tasks = [t["id"] for t in tasks if t.get("active", True)]
+                taskid = st.selectbox("Taak", active_tasks) if active_tasks else None
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    task_start = st.text_input("Begin (UU:MM)", value="09:00")
+                with col2:
+                    task_end = st.text_input("Einde (UU:MM)", value="10:00")
+                with col3:
+                    required_people = st.number_input("Aantal controleurs", 1, 30, 1)
+                if st.form_submit_button("Taakblok toevoegen", disabled=not (shid and taskid)):
+                    state = clone()
+                    state.setdefault("task_needs", []).append({"date": on_date, "shift_id": shid,
+                                                               "task_id": taskid, "start": task_start.strip(),
+                                                               "end": task_end.strip(), "required": int(required_people)})
+                    replace_and_rerun(state)
+        if needs:
+            choice = st.selectbox("Taakblok verwijderen", range(len(needs)),
+                                  format_func=lambda i: f"{needs[i]['date']} | {needs[i]['shift_id']} | {needs[i]['task_id']}")
+            if st.button("Verwijder taakblok"):
+                state = clone()
+                state["task_needs"].pop(choice)
+                replace_and_rerun(state)
+        st.caption("Taken worden niet ingepland als er geen geschikte controleur is; open taakplaatsen worden apart gerapporteerd.")
 
 elif screen == "Maandbehoefte":
     st.subheader("Welke dienstnummers zijn op welke dagen nodig?")
@@ -842,10 +928,29 @@ elif screen == "Planning":
     errors = validate_dataset(data)
     for error in errors:
         st.error(error)
+    auto_history = st.checkbox("Gepubliceerde weekendhistoriek automatisch meewegen", value=PERSISTENT,
+                               disabled=not PERSISTENT,
+                               help="Vervangt tijdens de berekening de handmatig opgegeven weekendhistoriek. "
+                                    "Alleen gepubliceerde eerdere maanden worden gelezen.")
+    months_back = st.slider("Historische periode (maanden)", 1, 12, 3, disabled=not auto_history)
+    past_plans = (store.published_plans_before(engine, data["year"], data["month"], months_back)
+                  if PERSISTENT and auto_history else [])
+    historic = aggregate_history(past_plans, [e["id"] for e in data["employees"]]) if auto_history else {}
+    if auto_history:
+        st.caption(f"Gevonden: {len(past_plans)} gepubliceerde voorgaande maandplanningen. "
+                   "Zonder vorige gepubliceerde plannen telt de historische weekendscore als 0.")
+        if past_plans:
+            st.dataframe(pd.DataFrame([{"Personeelsnr": e["id"], "Controleur": e["name"],
+                                        "Historische weekenddagen": historic[e["id"]]["weekend_days"],
+                                        "Gewerkte weekends": historic[e["id"]]["worked_weekends"]}
+                                       for e in data["employees"]]), hide_index=True, use_container_width=True)
     if st.button("🚀 Bereken maandplanning", type="primary", disabled=bool(errors)):
         try:
             with st.spinner("OR-Tools zoekt een zo goed mogelijke planning…"):
-                st.session_state.last_plan = solve_month(data)
+                calculation_data = apply_published_history(data, historic) if auto_history else data
+                st.session_state.last_plan = solve_month(calculation_data)
+                st.session_state.last_plan.summary.update({"history_months": len(past_plans),
+                                                           "history_lookback": months_back if auto_history else 0})
                 if PERSISTENT and st.session_state.last_plan.status in ("OPTIMAL", "FEASIBLE"):
                     st.session_state.last_plan_id = store.save_plan(
                         engine, data, st.session_state.workspace_revision,
@@ -878,6 +983,11 @@ elif screen == "Planning":
         a.metric("Benodigde plaatsen", plan.summary["required"])
         b.metric("Toegewezen plaatsen", plan.summary["assigned"])
         c.metric("Openstaande plaatsen", plan.summary["open"] if plan.summary["open"] is not None else "Onbekend")
+        if plan.summary.get("task_required"):
+            st.caption(f"Bijzondere taken: {plan.summary['task_assigned']} ingevuld, "
+                       f"{plan.summary['task_open']} open van {plan.summary['task_required']} plaatsen.")
+        if plan.summary.get("history_lookback"):
+            st.caption(f"Weekendhistoriek: {plan.summary.get('history_months', 0)} eerder gepubliceerde maanden verwerkt.")
         if plan.summary.get("seconds") is not None:
             st.caption(f"Rekentijd: {plan.summary['seconds']} seconden | Solver: {plan.summary['solver']}")
         if plan.assignments or plan.open_positions:
@@ -898,6 +1008,12 @@ elif screen == "Planning":
             st.markdown("#### Dienstverdeling en weekendwerk (test)")
             st.dataframe(pd.DataFrame(service_overview(data["employees"], plan.assignments)),
                          hide_index=True, use_container_width=True)
+            if plan.task_assignments or plan.open_tasks:
+                ta, tb = st.tabs(["Toegewezen taken", "Open taakplaatsen"])
+                with ta:
+                    st.dataframe(pd.DataFrame(plan.task_assignments), hide_index=True, use_container_width=True)
+                with tb:
+                    st.dataframe(pd.DataFrame(plan.open_tasks), hide_index=True, use_container_width=True)
             st.download_button("⬇️ Planning downloaden als Excel", data=plan_excel(plan, data),
                                file_name=f"controleursplanning_{data['year']}_{data['month']:02d}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

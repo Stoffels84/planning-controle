@@ -1,106 +1,61 @@
-# Controleursplanning v0.6.2 — foutcorrectie automatische planning
+# Controleursplanning v0.7 — weekendhistoriek en taakplanning (proefversie)
 
-**Bugfix:** In `planner.py` gebruikte de berekening van de weekend-eerlijkheid de variabele `needed` voordat deze werd gedefinieerd. Dat gaf een `UnboundLocalError`, die door het algemene foutbericht in de Streamlit-app niet zichtbaar werd. De eerdere planning kon intussen nog als `FEASIBLE` in beeld staan.
+Dit is een **voortzetting van de werkende v0.6.2**, met behoud van inloggen, wachtwoordherstel, bestaande database, voorkeuren, maandgrenzen en OR-Tools. Alleen **fictieve gegevens** gebruiken. Geen gevalideerde productieapplicatie voor De Lijn.
 
-**Installatie vanaf v0.6.1:** vervang uitsluitend `planner.py` in de hoofdmap van de bestaande GitHub-repository, klik **Commit changes** en laat Streamlit opnieuw uitrollen. Database, accounts, Secrets en `app.py` blijven ongewijzigd.
+## Wat is nieuw?
 
-**Controle:** Ga naar **Planning** en klik **Bereken maandplanning**. Als de berekening nu lukt, verschijnt een nieuwe planning met de actuele dienstbehoefte en zonder rode foutmelding. Controleer ook of er een nieuwe conceptversie wordt opgeslagen.
+1. **Historische weekendspreiding:** onder **Planning** kan de beheerder ervoor kiezen om weekenddagen uit de **gepubliceerde** planningen van de vorige 1–12 kalendermaanden te gebruiken. Een conceptversie telt niet mee. Als een maand meerdere gepubliceerde versies heeft, telt alleen de laatst gepubliceerde versie. Historische gegevens worden **uitsluitend voor de berekening geladen**; de eerder handmatig ingevulde historie in het personeelsprofiel wordt niet overschreven. Een dienst op zaterdag en zondag telt als twee weekenddagen en één gewerkt weekend (startdatum is bepalend). Dit is een **eenvoudige** historische eerlijkheidsmaat, niet gecorrigeerd voor alle mogelijke dienst- en arbeidsregimes of tijd in dienst.
+2. **Taken binnen bestaande diensten:** maak taken aan via het nieuwe tabblad **Taken**, eventueel met een verplichte bevoegdheid (kwalificatiecode). Leg vast op welke dag, bij welk dienstnummer, binnen welke uren en met hoeveel medewerkers een taak moet worden uitgevoerd. In **Controleurs > Profiel en beperkingen** kun je bevoegdheden en geblokkeerde taken beheren.
+3. **Automatische taaktoewijzing met OR-Tools:** een taak kan alleen worden toegewezen aan iemand die op dat dienstnummer op die datum is ingepland, de vereiste bevoegdheid heeft en niet voor die taak geblokkeerd is. Eén controleur kan geen twee overlappende taakblokken krijgen. Bij onvoldoende geschikte controleurs toont het resultaat **open taakplaatsen** in plaats van de regels te overtreden.
+4. **Nieuwe Excel-tabbladen:** `Taaktoewijzingen` en `Open taken`.
 
-**Veiligheid:** Maak vooraf een GitHub-herstelpunt; gebruik uitsluitend fictieve testgegevens. Voor een resterende fout: open Streamlit Community Cloud → de app → Manage app → Logs en deel uitsluitend de exception en relevante traceback, zonder secrets, namen of andere personeelsgegevens.
+**Belangrijke beperking:** deze versie ondersteunt **uitsluitend taken die binnen een bestaande dienst plaatsvinden en de controleur laten meetellen voor de oorspronkelijke dienstbezetting**. Taken die een volledige dienst vervangen, die de reguliere bezetting verminderen of los van een dienst staan, zijn **nog niet ondersteund**. De planningsmotor houdt nog geen rekening met verplaatsingstijden en officiële arbeidsregelingen. Maak voor zulke taken voorlopig géén taakblok aan, omdat dit een onjuiste bezettingsinterpretatie zou geven.
 
-**Tests:** Python-syntaxcontrole en regressietest voor deze specifieke fout. Integratietests met OR-Tools vereisen een omgeving waarin OR-Tools geïnstalleerd is.
+## Installeren op bestaande GitHub + Streamlit
 
----
+1. Bewaar de werkende v0.6.2 als GitHub-tag of branch én maak via de PostgreSQL-provider een echte databaseback-up.
+2. Pak `controleursplanning-github-streamlit-v07.zip` uit. Upload **alle bestanden en mappen** naar de hoofdmap van je bestaande **private** GitHub-repository. Vervang oude bestanden; verwijder niet je andere eigen bestanden.
+3. Nieuwe modules die zeker mee moeten: `history_v07.py` en `tasks_v07.py`. `app.py`, `planner.py`, `catalog.py` en `store.py` zijn ook gewijzigd. `requirements.txt` blijft gelijk.
+4. Streamlit zal na de GitHub-commit opnieuw deployen. Laat `DATABASE_URL` en andere Secrets ongewijzigd. De oude database en accounts blijven bestaan. Er is **geen schema-migratie** nodig: taakgegevens worden in de bestaande JSON-werkruimte bewaard.
+5. Log in met het bestaande beheerdersaccount. Verwijder `ADMIN_RECOVERY_KEY` uit Secrets als dat niet reeds gebeurd is. Gebruik uitsluitend verzonnen testgegevens.
 
-# Controleursplanning v0.6.1 — uitsluitend fictieve testgegevens
+## Vier eenvoudige tests
 
-**Stack:** GitHub + Streamlit + Python + OR-Tools + PostgreSQL. Volledige voortzetting van v0.5, geen destructieve migratie. **Geen bedrijfsapplicatie**: het is een prototype, arbeidstijd- en sectorregels zijn niet juridisch gevalideerd.
+### Test 1 — taak en kwalificatie
 
-## Hotfix v0.6.1 — direct bewerkbare maximumvelden
+- Open **Taken** en maak `DEMO_ACTIE` aan, met vereiste kwalificatie `TEST_KWAL`.
+- Open **Controleurs > Profiel en beperkingen**, kies een fictieve controleur, en selecteer bij **Behaalde taakbevoegdheden** `TEST_KWAL`. Sla op.
+- Open **Taken > Taken per datum**, kies een bestaande datum en een dienst die op die datum uitgevoerd wordt. Voeg één taakblok toe binnen de diensturen (voorbeeld: vroege dienst 06:00–14:00 → taak 10:00–11:00). Kies `DEMO_ACTIE` en `1` controleur.
+- Ga naar **Planning**, klik **Bereken maandplanning**, en bekijk **Toegewezen taken** / **Open taakplaatsen**. Alleen een bevoegde én op de juiste dienst ingedeelde controleur mag de taak krijgen. Bij onvoldoende geschikte medewerkers blijft de taak open.
 
-In het tabblad **Weekend en maandgrenzen** stonden de aan/uit-vinkjes en afhankelijke getalvelden in `st.form`-blokken. Streamlit verwerkt widgetwijzigingen binnen een formulier pas bij het indienen. Daardoor bleef `disabled=not ...` op de oude vinkjesstatus staan en waren de velden niet direct bewerkbaar.
+### Test 2 — onbevoegde medewerker
 
-**Oplossing:** de twee betrokken formulieren zijn vervangen door reactieve `st.container(border=True)`-secties met afzonderlijke bewaarknoppen. De checkbox schakelt het bijbehorende getalveld voortaan onmiddellijk in of uit. De gegevens worden pas in PostgreSQL opgeslagen na het klikken op **Algemene grenzen bewaren** of **Individuele instellingen bewaren**.
+- Haal `TEST_KWAL` weg uit alle profielen en bereken opnieuw. De taak moet open blijven. Zorg dat je de wijziging hebt opgeslagen.
 
-**Minimale installatie vanaf v0.6:** vervang alleen `app.py` in de hoofdmap van je GitHub-repository. Andere bestanden, Streamlit Secrets en de PostgreSQL-database blijven ongewijzigd. Bij een automatische Streamlit-herstart kan je de pagina opnieuw openen.
+### Test 3 — gepubliceerde historie
 
-**Controle:** open **Weekend en maandgrenzen**, vink **Persoonlijk maximum weekenddagen activeren** aan, wijzig de waarde bijvoorbeeld naar `2` en klik **Individuele instellingen bewaren**. Herhaal voor **maximum gewerkte weekends** en eventueel het algemene maximum. Vernieuw de pagina en controleer of de waarden bewaard bleven. Test uitsluitend met fictieve gegevens.
+- Publiceer een fictieve maandplanning, wijzig onder **Maandbehoefte** de actieve planningsmaand naar de volgende maand en bereken daar een nieuw rooster.
+- Schakel bij **Planning** `Gepubliceerde weekendhistoriek automatisch meewegen` in en kies een venster van 3 maanden. Boven de knop verschijnen de gevonden oudere, gepubliceerde maanden en weekendtellingen.
+- Conceptplanningen tellen niet mee. Na opnieuw publiceren van een herziene maand telt alleen die laatst gepubliceerde versie.
 
-## Nieuw in v0.6
+### Test 4 — behoud van bestaande gegevens
 
-### Weekend en maandgrenzen (nieuw tabblad)
+- Controleer dat accounts, bestaande diensten, voorkeuren en de PostgreSQL-verbinding onveranderd zijn.
+- Herstel bij problemen de v0.6.2-GitHub-tag/branch. Als je al v0.7-taakvelden hebt opgeslagen, zullen ze door v0.6.2 niet worden gebruikt, maar blijven ze in de werkruimte staan.
 
-- Centraal **maximum weekenddienst-dagen per maand** op basis van de startdatum (zaterdag of zondag), aan/uit instelbaar; individueel kunnen strengere maxima gelden.
-- Per medewerker **maximum aantal gewerkte weekends**: een weekend telt één keer, ook wanneer iemand zowel zaterdag als zondag werkt. Een weekend dat begint in de vorige maand maar eindigt in de huidige maand wordt herkend.
-- **Verplicht vrije weekends** instelbaar voor een individuele controleur. Het weekend loopt van zaterdag 00.00 tot maandag 00.00 uur. Dit blokkeert ook een overlappende nachtdienst van vrijdag op zaterdag of zondag op maandag.
-- **Maximumaantal diensten per categorie, per kalendermaand**, zowel algemeen als per controleur, als harde grens. `0` in de interface betekent 'geen maximum' voor de categorie; de beperking 'geen Nachtdiensten' van het profiel blijft hiervoor geschikt.
-- Per controleur **streefaantal vroege/dag/late/nachtdiensten** als zachte wens, niet als minimumgarantie. Leeg = geen streefwaarde; 0 = streef naar nul.
-- Historische weekenddagen kunnen **handmatig** worden opgegeven om de zachte weekend-eerlijkheid meermaandsgericht te simuleren. De verdeling wordt ruw gecorrigeerd voor arbeidspercentage, maar is nog geen formeel eerlijkheidsmodel. **Automatische historische aggregatie wordt later gebouwd.**
+## Technische bestanden
 
-### Uren (proefverrekening)
+- `app.py`: nieuwe schermen en opties voor historische berekeningen.
+- `history_v07.py`: pure historische aggregatie en berekeningskopie.
+- `tasks_v07.py`: taakdefinities, tijdsblokken en validatie.
+- `planner.py`: extra OR-Tools-variabelen voor taaktoewijzing en open taakplaatsen.
+- `catalog.py`: kwalificaties en persoonlijke taakblokkeringen met terugwaarts compatibele standaardwaarden.
+- `store.py`: read-only historische query op **gepubliceerde** planningversies.
+- `tests/test_v07_history_tasks.py` en `tests/test_v07_solver.py`: regressietests.
 
-- Per medewerker een optioneel **startsaldoveld** van −80 tot +80 uur.
-- De beheerder kan centraal de **simulatie van startsaldo** aan- of uitzetten. Als aan, kan de optimizer bij het zachte maandstreefdoel rekening houden met het startsaldo en eerder geregistreerde testcredits. Een positief saldo verlaagt de nagestreefde te plannen uren.
-- In tabblad **Uren en activiteiten**, de berekende **Planning** en in de Excel-export verschijnt een apart overzicht met planuren, testcredits, start-, eind- en afwijkingssaldos.
-- In Excel is er ook een nieuw tabblad **Dienstverdeling**, met toegewezen diensten per categorie en gewerkte weekenddagen.
-- **Belangrijk:** dit is uitsluitend rekenkundige simulatie van een saldo, geen wettelijk correcte uren-, verlof-, ziekte-, feestdagen-, loon- of overurenadministratie. Er wordt **nog geen automatisch saldo uit vorige maanden** geladen of definitief doorgeschoven.
+## Teststatus en beperkingen
 
-## Upgraden van v0.5 naar v0.6
-
-1. Bewaar de huidige werkende v0.5 op GitHub als **tag/herstelpunt**. Maak bovendien via je PostgreSQL-provider een echte **databaseback-up**; een GitHub-codekopie bevat geen databasegegevens.
-2. Pak `controleursplanning-github-streamlit-v06.zip` uit en upload de inhoud naar de **hoofdmap** van je bestaande **private** GitHub-repository. Overschrijf bestaande Pythonbestanden en voeg het **nieuwe `policy_v06.py`** en de nieuwe tests toe.
-3. Laat de bestaande Streamlit Secrets, in het bijzonder `DATABASE_URL`, ongewijzigd. Zorg dat de eenmalige `ADMIN_RECOVERY_KEY` van je eerdere herstelactie verwijderd is.
-4. Laat Streamlit opnieuw uitrollen. Log in met hetzelfde personeelsnummer en wachtwoord. Je bestaande gegevens blijven in dezelfde PostgreSQL-werkruimte; nieuwe velden krijgen terugwaarts compatibele standaardwaarden.
-5. Test alleen met fictieve medewerkers, nooit met echte controleurs- of personeelsgegevens.
-
-### Test A — bescherm een weekend
-
-- Open **Weekend en maandgrenzen**. Kies een fictieve controleur en vink het weekend dat begint op een zaterdag in je planningsmaand aan.
-- Klik **Individuele instellingen bewaren**, ga naar **Planning** en bereken opnieuw.
-- Controleer dat deze persoon zaterdag en zondag niet is ingepland. Controleer óók dat een late vrijdag-nachtdienst die doorloopt tot zaterdag niet wordt toegewezen.
-
-### Test B — maximum per categorie en weekend
-
-- Stel in het nieuwe tabblad voor één fictieve controleur **max. nachtdiensten per maand = 1** in. Bereken opnieuw en controleer via **Dienstverdeling** dat het maximum wordt gerespecteerd.
-- Stel vervolgens **max. weekenddagen = 1** in, en controleer dat de controleur maximaal één dienst krijgt waarvan de startdatum op zaterdag of zondag ligt.
-- De solver mag daardoor **openstaande dienstplaatsen** tonen. Harde maxima worden niet genegeerd om de bezetting toch vol te maken.
-
-### Test C — uurensaldo (rekenproef)
-
-- Vul bij één fictieve medewerker in **Weekend en maandgrenzen** een startsaldo van `+5,0 uur` in.
-- Vink centraal **Testsaldo meenemen bij het optimaliseren** aan en kijk of de resultaten in het urenoverzicht veranderen.
-- Het rekenkundige eindsaldo is `startsaldo + planuren + activiteitscredits − streefuren`, alleen indien streefuren zijn ingesteld.
-- Download de Excel-export en controleer de tabbladen **Urenoverzicht test** en **Dienstverdeling**.
-
-## Technische opbouw
-
-| Bestand | Inhoud |
-|---|---|
-| `app.py` | Bestaande webapp + nieuwe regel- en rapportschermen |
-| `policy_v06.py` | Nieuwe zuivere weekend-, categorie-, validatie- en urensaldofuncties |
-| `catalog.py` | Nieuwe velden met veilige defaults en validatie |
-| `planner.py` | Nieuwe CP-SAT-beperkingen en zachte streefwaardes |
-| `extras.py`, `store.py`, `demo_data.py` | Bestaande v0.5-modules, ongewijzigd |
-| `tests/test_v06_policy.py` | Zuivere v0.6-tests |
-| `tests/test_v06_solver.py` | OR-Tools-integratietests, alleen uitvoerbaar waar OR-Tools geïnstalleerd is |
-
-## Teststatus van dit pakket
-
-- Python-syntaxcontrole: geslaagd.
-- `python -m pytest -q`: **30 geslaagd, 4 testmodules overgeslagen**, omdat OR-Tools niet kon worden geïnstalleerd in de uitvoeromgeving.
-- Streamlit-app werd in deze omgeving niet met de browser getest. De solveruitbreidingen moeten op jouw Streamlit-omgeving getest worden voordat ze als werkend kunnen worden beschouwd.
-
-### Optioneel lokaal testen (Windows)
-
-```powershell
-py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m pip install pytest
-python -m pytest -q
-streamlit run app.py
-```
-
-## Bewuste beperkingen en volgende stappen
-
-De v0.6-planningsmotor houdt nog niet automatisch rekening met werkelijk gepubliceerde weekendhistoriek, uren over meerdere maanden, volledige vaste werk-/rustcycli over de maandgrens, locatieverplaatsingstijden, bijzondere taaktoewijzingen of officiële sectorregels. Langdurige optimalisaties lopen nog in het Streamlit-proces en zijn geen afzonderlijke achtergrondtaken. Er is nog geen inzet voor echte personeelsgegevens toegestaan; authenticatie, gegevensbeheer en privacy moeten voor productie apart beoordeeld worden.
+- Python-syntax: gecontroleerd.
+- Offline: **36 tests geslaagd; 5 solvermodules overgeslagen** omdat OR-Tools in deze omgeving niet kon worden geïnstalleerd.
+- **De nieuwe taaksolver is hier niet live met OR-Tools uitgevoerd.** Test de taaktoewijzing expliciet op Streamlit vóór verder gebruik.
+- De proefversie ondersteunt nog geen pauzes, salarisadministratie, geldige werk-rustcycli over maandgrenzen, afzonderlijke optimalisatieworkers, goedkeuringsflows, automatische databaseback-ups of een volledige productiebeveiliging. Bedrijfsgebruik vereist toestemming, arbeidsrechtelijke validatie, beveiligingsreview en passende hosting.

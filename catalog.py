@@ -38,6 +38,8 @@ def profile(employee: dict) -> dict:
     result.setdefault("protected_weekends", [])
     result.setdefault("historic_weekend_days", 0)
     result.setdefault("opening_hour_balance", 0.0)
+    result.setdefault("qualifications", [])
+    result.setdefault("blocked_tasks", [])
     return result
 
 
@@ -62,7 +64,7 @@ def new_employee(identifier: str, name: str, team: str, contract_percent: int, m
         "max_month_categories": {}, "target_month_categories": {},
         "max_weekend_days": None, "max_worked_weekends": None,
         "protected_weekends": [], "historic_weekend_days": 0,
-        "opening_hour_balance": 0.0, "active": True,
+        "opening_hour_balance": 0.0, "qualifications": [], "blocked_tasks": [], "active": True,
     }
 
 

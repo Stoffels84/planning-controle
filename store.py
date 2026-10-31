@@ -353,3 +353,26 @@ def recent_audit(engine, count: int = 100) -> list[dict]:
     with session_factory(engine)() as s:
         rows = s.scalars(select(AuditEvent).order_by(AuditEvent.id.desc()).limit(count)).all()
         return [{"Tijdstip (UTC)": a.created_at.isoformat(), "Gebruiker": a.actor, "Actie": a.action} for a in rows]
+
+
+def published_plans_before(engine, year: int, month: int, months_back: int = 3) -> list[dict]:
+    """Laatste GEPUBLICEERDE versie per vroegere maand binnen het kijkvenster.
+
+    Read-only; concepten en planningen voor de doelmaand tellen niet mee.
+    """
+    if not 1 <= months_back <= 12:
+        raise ValueError('Kijkvenster moet 1–12 maanden zijn.')
+    target = year * 12 + month - 1
+    with session_factory(engine)() as s:
+        rows = s.scalars(
+            select(PlanningVersion)
+            .where(PlanningVersion.published_at.is_not(None))
+            .order_by(PlanningVersion.published_at.desc(), PlanningVersion.id.desc())
+        ).all()
+        found = {}
+        for row in rows:
+            period = row.year * 12 + row.month - 1
+            if target - months_back <= period < target:
+                found.setdefault(period, row)
+        return [{'year': p.year, 'month': p.month, 'id': p.id, 'payload': p.payload}
+                for _, p in sorted(found.items())]
