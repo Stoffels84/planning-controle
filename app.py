@@ -29,8 +29,9 @@ from requests_v010 import STATUS_LABELS
 from swap_v011 import regular_assignments
 from month_copy_v013 import copy_month_demand_rows
 from dashboard_v014 import summarize_month, summarize_requests, dashboard_warnings, dashboard_counts
+from boundary_v015 import published_boundary_context, with_boundary_context
 
-st.set_page_config(page_title="Controleursplanning | v0.14.1", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.15", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -442,7 +443,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.14.1 • Dashboardcorrectie • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.15 • Maandgrenscontrole • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -1275,12 +1276,22 @@ elif screen == "Planning":
                                         "Historische weekenddagen": historic[e["id"]]["weekend_days"],
                                         "Gewerkte weekends": historic[e["id"]]["worked_weekends"]}
                                        for e in data["employees"]]), hide_index=True, use_container_width=True)
+    boundary_context = (published_boundary_context(engine, data["year"], data["month"])
+                        if PERSISTENT else {"sources": {"previous": None, "next": None}, "assignments": []})
+    st.caption("Maandgrenscontrole: " + ", ".join(
+        f"{label}: {'gepubliceerde versie #' + str(boundary_context['sources'][side]) if boundary_context['sources'][side] else 'nog geen gepubliceerd rooster'}"
+        for side, label in (("previous", "vorige maand"), ("next", "volgende maand"))))
+    if any(v is None for v in boundary_context["sources"].values()):
+        st.info("Zonder gepubliceerde aangrenzende maand kunnen de rusttijden en dienstreeksen "
+                "aan die kant nog niet definitief worden gecontroleerd. Herbereken later indien nodig.")
     if st.button("🚀 Bereken maandplanning", type="primary", disabled=bool(errors)):
         try:
             with st.spinner("OR-Tools zoekt een zo goed mogelijke planning…"):
                 calculation_data = apply_published_history(data, historic) if auto_history else data
+                calculation_data = with_boundary_context(calculation_data, boundary_context)
                 st.session_state.last_plan = solve_month(calculation_data)
-                st.session_state.last_plan.summary.update({"history_months": len(past_plans),
+                st.session_state.last_plan.summary.update({"boundary_sources": boundary_context["sources"],
+                                                           "history_months": len(past_plans),
                                                            "history_lookback": months_back if auto_history else 0})
                 if PERSISTENT and st.session_state.last_plan.status in ("OPTIMAL", "FEASIBLE"):
                     st.session_state.last_plan_id = store.save_plan(
@@ -1299,6 +1310,9 @@ elif screen == "Planning":
         plan = st.session_state.last_plan
         if plan_record and plan_record["revision"] != st.session_state.workspace_revision:
             st.warning("Deze conceptplanning is berekend met een oudere versie van de invoergegevens.")
+        if plan_record and ((plan.summary or {}).get("boundary_sources") != boundary_context["sources"]):
+            st.warning("De aangrenzende gepubliceerde maanden zijn gewijzigd of deze planning "
+                       "is nog zonder maandgrenscontrole berekend. Bereken opnieuw vóór publicatie.")
         st.markdown(f"#### Resultaat: {plan.status}")
         if plan_record:
             st.caption(f"Versie #{plan_record['id']} • {'Gepubliceerd' if plan_record['published'] else 'Concept'} • Opgesteld door {plan_record['author']}")
@@ -1444,7 +1458,10 @@ elif screen == "Optimalisatie vergelijken":
         historical_values = (aggregate_history(historical, [e["id"] for e in data["employees"]])
                              if use_history else {})
         calculation_data = apply_published_history(data, historical_values) if use_history else data
-        fingerprint = signature(data, historical)
+        boundary_context_alternatives = (published_boundary_context(engine, data["year"], data["month"])
+                                         if PERSISTENT else {"sources": {"previous": None, "next": None}, "assignments": []})
+        calculation_data = with_boundary_context(calculation_data, boundary_context_alternatives)
+        fingerprint = signature(data, historical + [{"boundary_sources": boundary_context_alternatives["sources"]}])
         active_comparison = st.session_state.get("alternatives_v09")
         if active_comparison and active_comparison["fingerprint"] != fingerprint:
             st.session_state.pop("alternatives_v09", None)
@@ -1468,6 +1485,7 @@ elif screen == "Optimalisatie vergelijken":
                         variation = with_profile(calculation_data, target_profile, int(limit_seconds))
                         generated = solve_month(variation)
                     generated.summary.update({
+                        "boundary_sources": boundary_context_alternatives["sources"],
                         "optimization_profile": target_profile["name"],
                         "optimization_weights": {k: target_profile[k] for k in WEIGHT_KEYS},
                         "history_months": len(historical),
@@ -1506,7 +1524,7 @@ elif screen == "Optimalisatie vergelijken":
                                             f" (open: {eligible_items[i]['result']['summary'].get('open', '?')})",
                                             key="v09_choice_to_save")
                 if st.button("💾 Gekozen alternatief als concept bewaren", key="v09_confirm_plan"):
-                    if st.session_state.alternatives_v09["fingerprint"] != signature(data, historical):
+                    if st.session_state.alternatives_v09["fingerprint"] != signature(data, historical + [{"boundary_sources": boundary_context_alternatives["sources"]}]):
                         st.error("Invoer veranderd. Genereer de alternatieven opnieuw.")
                     else:
                         plan = PlanResult(**eligible_items[selected_idx]["result"])

@@ -621,6 +621,23 @@ def change_password(engine, employee_id: str, old_password: str, new_password: s
         _audit(s, employee_id, "Eigen wachtwoord gewijzigd")
 
 
+def _published_boundary_ids(s, year: int, month: int) -> dict:
+    """Nieuwste gepubliceerde versies in de twee aangrenzende maanden."""
+    from boundary_v015 import adjacent_months
+    result = {}
+    for side, (y, m) in adjacent_months(year, month).items():
+        row = _current_published(s, y, m)
+        result[side] = row.id if row else None
+    return result
+
+
+def _assert_boundary_current(s, year: int, month: int, payload: dict) -> None:
+    saved_sources = (payload.get("summary") or {}).get("boundary_sources")
+    if saved_sources is not None and saved_sources != _published_boundary_ids(s, year, month):
+        raise ConflictError("Een gepubliceerde aangrenzende maand is gewijzigd. "
+                            "Bereken de planning opnieuw om de rustregels te controleren.")
+
+
 def save_plan(engine, data: dict, workspace_revision: int, result: dict, actor: str) -> int:
     with session_factory(engine).begin() as s:
         who = s.get(Account, actor)
@@ -629,6 +646,7 @@ def save_plan(engine, data: dict, workspace_revision: int, result: dict, actor: 
         w = _period_workspace(s, int(data["year"]), int(data["month"]))
         if w is None or w.revision != workspace_revision:
             raise ConflictError("De invoergegevens zijn tijdens de berekening veranderd. Vernieuw en bereken opnieuw.")
+        _assert_boundary_current(s, int(data["year"]), int(data["month"]), result)
         row = PlanningVersion(workspace_revision=workspace_revision, year=data["year"], month=data["month"],
                               author=actor, created_at=now(), payload=result)
         s.add(row)
@@ -660,6 +678,7 @@ def publish_plan(engine, plan_id: int, expected_revision: int, actor: str) -> No
         w = _period_workspace(s, row.year, row.month) if row else None
         if row is None or w is None or w.revision != expected_revision or row.workspace_revision != expected_revision:
             raise ConflictError("Deze planning is verouderd. Bereken opnieuw met de actuele invoergegevens.")
+        _assert_boundary_current(s, row.year, row.month, row.payload)
         if row.payload.get("status") not in ("OPTIMAL", "FEASIBLE"):
             raise ValueError("Er is geen geldige planning om te publiceren.")
         row.published_at = now()
@@ -931,8 +950,14 @@ def decide_swap(engine, request_id: int, actor: str, approve: bool, validator=No
         workspace_snapshot = (merge_shared(w.payload, s.get(SharedCatalog, 1).payload)
                               if isinstance(w, MonthWorkspace) else w.payload)
         old_id = published.id
+        boundary_snapshot = _published_boundary_ids(s, published.year, published.month)
     if approve:
-        (validator or verify_swap_with_solver)(workspace_snapshot, candidate, source_plan)
+        from boundary_v015 import with_boundary_context, published_boundary_context
+        context = published_boundary_context(engine, r.own_day.year, r.own_day.month)
+        if context["sources"] != boundary_snapshot:
+            raise ConflictError("Een buurplanning is tijdens de voorbereiding gewijzigd. Probeer opnieuw.")
+        validated_workspace = with_boundary_context(workspace_snapshot, context)
+        (validator or verify_swap_with_solver)(validated_workspace, candidate, source_plan)
     with session_factory(engine).begin() as s:
         r = s.scalar(select(SwapRequest).where(SwapRequest.id == request_id).with_for_update())
         w = _period_workspace(s, r.own_day.year, r.own_day.month) if r else None
@@ -945,6 +970,9 @@ def decide_swap(engine, request_id: int, actor: str, approve: bool, validator=No
         if published is None or published.id != old_id or published.workspace_revision != w.revision:
             raise ConflictError("De gepubliceerde planning is ondertussen gewijzigd.")
         if approve:
+            if _published_boundary_ids(s, published.year, published.month) != boundary_snapshot:
+                raise ConflictError("Een aangrenzende gepubliceerde planning is intussen gewijzigd.")
+            candidate.setdefault("summary", {})["boundary_sources"] = boundary_snapshot
             # Verhoog de revisie om oude concepten en al berekende alternatieven te
             # blokkeren voor herpublicatie na deze ruil. Payload zelf blijft gelijk.
             w.revision += 1

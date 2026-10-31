@@ -4,7 +4,7 @@ Dit is GEEN gevalideerde implementatie van de arbeidsregels van De Lijn.
 Dekt o.a. bezetting, maandelijkse urenlimieten, individuele inzetbaarheid,
 rust per dienstovergang, verboden overgangen, maximum categoriedienstreeksen,
 zachte urenstreefdoelen en zachte wensen.
-Niet gedekt: vorige/volgende maand, verlofsaldi, taken, verplaatsingen,
+Niet gedekt: loon-/verlofsaldi, verplaatsingstijden,
 weekendpatronen, aparte wettelijke toetsing.
 """
 
@@ -23,6 +23,7 @@ from extras import preference_type, rest_blocked_during, validate_extras
 from policy_v06 import touches_protected_weekend, saturday_for
 from tasks_v07 import task_bounds, validate_tasks, need_mode, standalone_code, standalone_bounds
 from optimization_v09 import validate_profiles
+from boundary_v015 import validate_boundary_rows
 
 
 @dataclass
@@ -96,6 +97,7 @@ def validate_dataset(data: dict) -> list[str]:
     errors.extend(validate_extras(data))
     errors.extend(validate_tasks(data))
     errors.extend(validate_profiles(data))
+    errors.extend(validate_boundary_rows(data))
     return errors
 
 
@@ -297,6 +299,40 @@ def solve_month(data: dict, fixed_plan: dict | None = None) -> PlanResult:
             currently_released = [v for x1, x2, vs in blocks if x1 < b and x2 > a for v in vs]
             model.add(people - sum(currently_released) + vacancy[ri] >= req["required"])
 
+    # v0.15 — harde regels over de maandgrens. De gepubliceerde buurplannen
+    # bevatten de EFFECTIEVE diensturen, niet de ondertussen gewijzigde catalogus.
+    # Elk buurrooster is vast; alleen toekomstige toewijzingen zijn solverkeuzes.
+    boundary_by_employee = defaultdict(list)
+    for item in data.get("_boundary_assignments", []):
+        boundary_by_employee[item["employee_id"]].append(item)
+    for ei, emp in enumerate(employees):
+        for past in boundary_by_employee[emp["id"]]:
+            fixed_start, fixed_end = get_slot_bounds(past["date"], past)
+            fixed_day = date.fromisoformat(past["date"])
+            for ri, var in employee_vars[ei]:
+                req = slots[ri]
+                shift = shifts[req["shift_id"]]
+                candidate_start, candidate_end = get_slot_bounds(req["date"], shift)
+                candidate_day = date.fromisoformat(req["date"])
+                if fixed_start <= candidate_start:
+                    prev_start, prev_end = fixed_start, fixed_end
+                    prev_day, next_day = fixed_day, candidate_day
+                    prev_cat, next_cat = past["category"], shift["category"]
+                else:
+                    prev_start, prev_end = candidate_start, candidate_end
+                    prev_day, next_day = candidate_day, fixed_day
+                    prev_cat, next_cat = shift["category"], past["category"]
+                pair = transition_code(prev_cat, next_cat)
+                rest = max(float(settings["min_rest_hours"]),
+                           float(emp["min_rest_hours"] or 0),
+                           float(settings["transition_rest_hours"].get(pair, 0)))
+                too_close = next_day == prev_day or max(candidate_start, fixed_start) < prev_end + timedelta(hours=rest)
+                adjacent = (next_day - prev_day).days == 1
+                if adjacent and (pair in settings["blocked_transitions"] or pair in emp["blocked_transitions"]):
+                    too_close = True
+                if too_close:
+                    model.add(var == 0)
+
     # Daggebonden dienstwens: eenmalige bonus/penalty voor precies die datum
     # en dat dienstnummer. Niet alleen een straf voor 'de verkeerde dienst':
     # ook een volledige vrije dag geldt als niet-ingewilligde dienstwens.
@@ -413,6 +449,46 @@ def solve_month(data: dict, fixed_plan: dict | None = None) -> PlanResult:
                 model.add_max_equality(worked, assigned)
                 weekend_used.append(worked)
             model.add(sum(weekend_used) <= emp["max_worked_weekends"])
+
+    # v0.15 — opeenvolgende werkdagen en dienstcategorieën over de maandgrens.
+    # Een kalenderdag met een gepubliceerde dienst telt als één gewerkte dag.
+    # Er worden alleen vensters gecontroleerd die beide kanten van een grens
+    # raken. Oude overtredingen in buurmaanden kunnen niet meer gewijzigd worden:
+    # in dat geval verbieden we iedere extra toewijzing in het betrokken venster.
+    month_first = date(int(data["year"]), int(data["month"]), 1)
+    month_last = next_month - timedelta(days=1)
+    for ei, emp in enumerate(employees):
+        historical_days = defaultdict(set)
+        for item in boundary_by_employee[emp["id"]]:
+            historical_days[date.fromisoformat(item["date"])].add(item["category"])
+        current_all = defaultdict(list)
+        current_category = defaultdict(list)
+        for ri, var in employee_vars[ei]:
+            day = date.fromisoformat(slots[ri]["date"])
+            current_all[day].append(var)
+            current_category[day, shifts[slots[ri]["shift_id"]]["category"]].append(var)
+        checks = [(int(emp.get("max_consecutive") or settings["max_consecutive"]), None)]
+        for cat in ("Vroeg", "Dag", "Laat", "Nacht"):
+            limits = [int(v) for v in (settings["max_category_run"].get(cat),
+                                       emp["max_category_run"].get(cat)) if v is not None]
+            if limits:
+                checks.append((min(limits), cat))
+        for limit, cat in checks:
+            # Startdata binnen 7 dagen van de twee maandgrenzen; max_run <= 7.
+            for boundary in (month_first, next_month):
+                for offset in range(1, limit + 1):
+                    window_start = boundary - timedelta(days=offset)
+                    window = [window_start + timedelta(days=i) for i in range(limit + 1)]
+                    if not any(d < month_first or d > month_last for d in window):
+                        continue
+                    history_count = sum(int(bool(historical_days.get(d)) if cat is None
+                                            else cat in historical_days.get(d, set()))
+                                        for d in window)
+                    vars_current = [v for day in window
+                                    for v in (current_all.get(day, []) if cat is None
+                                              else current_category.get((day, cat), []))]
+                    if vars_current:
+                        model.add(sum(vars_current) <= max(0, limit - history_count))
 
     # Eenvoudige spreiding: afwijking van gemiddelde aantal diensten + weekenddiensten.
     total = sum(all_assigned)

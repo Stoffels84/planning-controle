@@ -1,33 +1,50 @@
-# Controleursplanning v0.14.1 — Herstel beheerdersdashboard
+# Controleursplanning v0.15 — harde controles over maandgrenzen
 
-Deze versie is een **gerichte correctie** op v0.14. Het kan voorkomen dat de eerste vier metrieken correct verschijnen, terwijl onder `Planningstatus en opvolging` een generieke foutmelding staat. De databaseverbinding werkt dan voor het hoofdscherm; de fout bevindt zich mogelijk in de extra dashboardquery of verwerking van oudere planresultaten.
+**Testversie, uitsluitend voor fictieve gegevens.** Deze applicatie is niet juridisch gevalideerd voor echte arbeidsroosters of persoonsgegevens van De Lijn.
 
-## Wat is aangepast?
+## Nieuw in v0.15
 
-- Onvolledige of oudere resultaten zonder een bruikbare `summary` veroorzaken niet meteen een dashboardcrash. Onbekende plancijfers worden leeg gelaten, niet als nul weergegeven.
-- De selectie van de nieuwste publicatie kan geen fout meer geven door een mix van tijdstempels met en zonder tijdzone.
-- Opvragen van maandstatus, verlof en ruilen gebeurt afzonderlijk: een probleem in één onderdeel blokkeert de rest van het dashboard niet.
-- Als een databron toch faalt, staat de technische traceback in de **Streamlit Community Cloud-logs** met één van de zoektermen `DASHBOARD_V0141_MONTHS`, `DASHBOARD_V0141_LEAVE` of `DASHBOARD_V0141_SWAP`. De interface toont alleen het type fout, geen database-URL of wachtwoorden.
-- **Geen** databaseverwijdering, datamigratie of wijziging aan de OR-Tools-planningsmotor.
+- Voor het maken van een maandplanning haalt het systeem de **laatste gepubliceerde** versies op van de direct **vorige en volgende** kalendermaand, indien aanwezig.
+- OR-Tools controleert die vaste historische/naastliggende toewijzingen tegenover de nieuw te berekenen maand op:
+  - overlappingen, minimumrust, specifieke rust per dienstovergang;
+  - verboden opeenvolgingen van dienstcategorieën op aangrenzende kalenderdagen;
+  - maximum aantal opeenvolgende werkdagen en maximum aaneengesloten diensten per categorie.
+- Een nachtdienst die na middernacht eindigt wordt op basis van de werkelijke tijdstippen behandeld.
+- Bij elk nieuw berekend concept worden IDs van de geraadpleegde aangrenzende publicaties opgeslagen. **Als een van de buurmaanden opnieuw wordt gepubliceerd vóórdat je het concept publiceert, blokkeert de applicatie de publicatie.** Ook het selecteren van een alternatief gebruikt die context.
+- De validatie van onderlinge dienstwissels krijgt eveneens de huidige gepubliceerde buurmaanden mee.
+- De database, dienstcatalogus en historische roosters blijven ongewijzigd. Er is **geen databasemigratie** nodig.
 
-## Bijwerken via GitHub
+## Wat deze controle NIET garandeert
 
-1. Bewaar een herstelpunt van de werkende v0.13/v0.14-commit en maak een databaseback-up.
-2. Upload **alle bestanden uit deze ZIP** naar de bestaande privérepository, zodat zowel `app.py`, `store.py` als `dashboard_v014.py` worden bijgewerkt.
-3. Laat `DATABASE_URL`, gebruikersaccounts en overige Streamlit Secrets ongewijzigd. De herstelcode `ADMIN_RECOVERY_KEY` moet verwijderd blijven als hij al gebruikt werd.
-4. Laat Streamlit de app opnieuw uitrollen en open **Overzicht → Planningstatus en opvolging**.
-5. Controleer of de maanden, statussen en bezettingsgraad verschijnen en of bestaande planningen ongewijzigd zijn.
+- Als een aangrenzende maand **nog geen gepubliceerde planning** heeft, bestaat er geen rooster om aan die kant te controleren. De app toont dit expliciet. Controleer opnieuw als de buurmaand wordt gepubliceerd.
+- Een achteraf gewijzigde gepubliceerde maand **past de al gepubliceerde aangrenzende maand niet automatisch aan**. Controleer daarom steeds beide kanten na wijzigingen, zeker na een ruil of herpublicatie.
+- De overige beperkingen uit het ontwerp (bijv. wettelijke afspraken, beschikbaarheid per tijdslot, echte verplaatsingstijden) zijn nog niet allemaal volledig gebouwd of gevalideerd.
+- Een testwaarde van 11 uur minimumrust is geen uitspraak over de toepasselijke De Lijn-arbeidsregels.
 
-**Als het onderdeel nog niet laadt:** open https://share.streamlit.io, selecteer de app, klik op `Manage app` en open **Logs**. Zoek naar de regel `DASHBOARD_V0141_MONTHS`, `DASHBOARD_V0141_LEAVE` of `DASHBOARD_V0141_SWAP`. Deel alleen de foutsoort en relevante tracebackregels; verwijder eventuele database-URL's, tokens, wachtwoorden en personeelsgegevens. Daarmee kunnen we de exacte oorzaak oplossen. De huidige screenshot alleen toont die technische oorzaak niet.
+## Update van v0.14.1
 
-## Status en beperkingen
+1. Maak eerst een herstelpunt van de werkende GitHub-commit en een back-up van je PostgreSQL-database.
+2. Download de v0.15 ZIP en pak hem uit. Upload **alle bestanden uit het ZIP-project** naar de hoofdmap van je bestaande privérepository. Voeg vooral `boundary_v015.py` toe en vervang `app.py`, `planner.py` en `store.py`.
+3. Bewaar je `DATABASE_URL`, accounts, wachtwoorden en overige Streamlit Secrets ongewijzigd. Geen nieuwe database of herstelcode nodig.
+4. Wacht op de Streamlit-heruitrol, log in als testbeheerder en open **Planning**.
+5. Controleer boven de berekenknop de vermelding van gepubliceerde voorgaande en volgende maand.
 
-Lokale syntaxcontrole en automatische tests zijn uitgevoerd op deze versie. De volledige Streamlit-interface en jouw PostgreSQL-database zijn niet toegankelijk in deze ontwikkelomgeving, dus deze correctie is nog niet op jouw hostingomgeving geverifieerd. Het is nog steeds een testapp voor fictieve gegevens, niet geschikt voor operationele personeelsplanning.
+## Tests op Streamlit
 
-## Zelf tests uitvoeren
+**Scenario A — rust na nacht:** Publiceer een fictieve maand waarin een controleur op de laatste dag een nachtdienst van 22.00–06.00 uur heeft. Maak de volgende maand en plan dezelfde medewerker op de eerste dag voor een vroege dienst. Het systeem moet die combinatie uitsluiten en zo nodig een dienstplaats open laten.
+
+**Scenario B — opeenvolgende dagen:** Stel een maximum van vijf opeenvolgende werkdagen in. Laat een fictieve controleur op de laatste vijf kalenderdagen van de vorige maand diensten uitvoeren, publiceer die maand en bereken de nieuwe maand. De eerste dag van de nieuwe maand mag niet opnieuw aan die controleur worden toegewezen.
+
+**Scenario C — gewijzigde buurmaand:** Bereken in de nieuwe maand een concept. Publiceer dan een nieuw rooster voor de vorige maand. Het oude concept van de nieuwe maand moet als mogelijk verouderd verschijnen en mag niet meer als actueel gepubliceerd worden zonder herberekening.
+
+**Opgelet:** scenario's A/B vereisen geschikte fictieve personeelsbezetting en tijdig gepubliceerde testmaanden. Een solver kan anders een lege plaats laten staan; dat is veilig gedrag.
+
+## Ontwikkelaarstests
 
 ```bash
 python -m pip install -r requirements.txt
 python -m pip install pytest
 python -m pytest -q
 ```
+
+Hier lokaal: 97 automatische tests geslaagd, 9 solvertestmodules overgeslagen omdat OR-Tools in de ontwikkelomgeving ontbreekt. De solverregels moeten op de draaiende Streamlit-app alsnog getest worden.
