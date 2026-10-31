@@ -21,7 +21,7 @@ from catalog import (is_unavailable_during, profile, settings_with_defaults, tra
                      validate_employee, validate_shift, validate_schedule_settings)
 from extras import preference_type, rest_blocked_during, validate_extras
 from policy_v06 import touches_protected_weekend, saturday_for
-from tasks_v07 import task_bounds, validate_tasks
+from tasks_v07 import task_bounds, validate_tasks, need_mode, standalone_code, standalone_bounds
 
 
 @dataclass
@@ -104,14 +104,42 @@ def solve_month(data: dict) -> PlanResult:
 
     employees = [profile(e) for e in data["employees"] if e.get("active", True)]
     shifts = {s["id"]: s for s in data["shifts"]}
-    slots = sorted([r for r in data["demand"] if r["required"] > 0], key=lambda r:(r["date"],r["shift_id"]))
+    service_slots = [r for r in data["demand"] if r["required"] > 0]
+    slots = list(service_slots)
+    task_lookup = {t["id"]: t for t in data.get("tasks", [])}
+    standalone_codes = {}
+    # Zelfstandige taken werken als aparte 'dienst' in het solvermodel,
+    # zonder dat ze een gewoon dienstnummer of een gewone dienstplaats krijgen.
+    # Zo gelden dezelfde rust-, werkdag-, uren- en beschikbaarheidsregels.
+    for ti, need in enumerate(data.get("task_needs", [])):
+        if need_mode(need) != "standalone":
+            continue
+        code = standalone_code(ti)
+        if code in shifts:
+            raise ValueError("Intern taaknummer botst met een bestaand dienstnummer.")
+        task = task_lookup[need["task_id"]]
+        shifts[code] = {"id": code, "category": task.get("category", "Dag"),
+                        "start": need["start"], "end": need["end"],
+                        "name": task["name"], "active": True, "required": need["required"]}
+        slots.append({"date": need["date"], "shift_id": code,
+                      "required": need["required"], "_task_index": ti})
+        standalone_codes[code] = ti
+    slots.sort(key=lambda r: (r["date"], r["shift_id"]))
     needed = sum(r["required"] for r in slots)
     if not employees:
-        return PlanResult("Geen beschikbare controleurs", [],
-                          [{"Datum": r["date"], "Dienstnummer": r["shift_id"],
-                            "Categorie": shifts[r["shift_id"]]["category"], "Open plaatsen": r["required"]} for r in slots],
-                          {"required": sum(r["required"] for r in slots), "assigned": 0,
-                           "open": sum(r["required"] for r in slots), "solver": "n.v.t."})
+        service_missing = [{"Datum": r["date"], "Dienstnummer": r["shift_id"],
+                            "Categorie": shifts[r["shift_id"]]["category"],
+                            "Open plaatsen": r["required"]} for r in service_slots]
+        task_missing = [{"Datum": n["date"], "Dienstnummer": n.get("shift_id") or "Zelfstandig",
+                         "Taakcode": n["task_id"], "Taak": task_lookup[n["task_id"]]["name"],
+                         "Soort": need_mode(n), "Open taakplaatsen": n["required"]}
+                        for n in data.get("task_needs", [])]
+        required = sum(r["required"] for r in service_slots)
+        return PlanResult("Geen beschikbare controleurs", [], service_missing,
+                          {"required": required, "assigned": 0, "open": required, "solver": "n.v.t.",
+                           "task_required": sum(n["required"] for n in data.get("task_needs", [])),
+                           "task_assigned": 0, "task_open": sum(n["required"] for n in data.get("task_needs", []))},
+                          [], task_missing)
     if not slots:
         return PlanResult("Geen dienstbehoefte", [], [], {"required": 0, "assigned": 0, "open": 0, "solver": "n.v.t."})
 
@@ -128,6 +156,8 @@ def solve_month(data: dict) -> PlanResult:
     task_selected = {}
     task_open_vars = {}
     task_employee_intervals = defaultdict(list)
+    eligible_by_slot = {}
+    release_blocks = defaultdict(list)
     all_assigned = []
     settings = settings_with_defaults(data["settings"])
 
@@ -184,46 +214,86 @@ def solve_month(data: dict) -> PlanResult:
 
         open_var = model.new_int_var(0, req["required"], f"open_{ri}")
         vacancy[ri] = open_var
-        model.add(sum(eligible) + open_var == req["required"])
+        # Bezetting na taaktoewijzing vastleggen: tijdelijke vrijstellingen
+        # kunnen extra personeel voor dezelfde dienst vereisen.
+        eligible_by_slot[ri] = eligible
 
     for vars_today in staff_day.values():
         model.add(sum(vars_today) <= 1)
 
-    # v0.7: taakblokken BINNEN reeds ingeplande diensten.
-    # Taakbezetting is aanvullend aan dienstbezetting; deze proefversie telt de
-    # controleur tijdens de taak nog mee op de oorspronkelijke dienst.
-    shift_slot = {(r["date"], r["shift_id"]): ri for ri,r in enumerate(slots)}
-    task_lookup = {t["id"]: t for t in data.get("tasks", [])}
+    # Taaktoewijzing: embedded telt mee, released verlaagt de operationele
+    # dekking tijdelijk; standalone is een afzonderlijke daginzet.
+    shift_slot = {(r["date"], r["shift_id"]): ri for ri, r in enumerate(slots)}
     for ti, need in enumerate(data.get("task_needs", [])):
         task = task_lookup[need["task_id"]]
-        ri = shift_slot.get((need["date"], need["shift_id"]))
-        if ri is None:  # Dienst heeft 0 vereiste plaatsen; toch open taak tonen.
-            available = []
-        else:
-            start, end = task_bounds(need["date"], need["start"], need["end"],
-                                     shifts[need["shift_id"]]["start"])
-            available = []
+        mode = need_mode(need)
+        if mode == "standalone":
+            ri = shift_slot[(need["date"], standalone_code(ti))]
+            task_open_vars[ti] = vacancy[ri]
             for ei, employee in enumerate(employees):
-                parent = x.get((ei, ri))
-                if parent is None:
+                var = x.get((ei, ri))
+                if var is None:
                     continue
-                required_qualification = task.get("qualification", "")
-                if required_qualification and required_qualification not in employee.get("qualifications", []):
-                    continue
-                if task["id"] in employee.get("blocked_tasks", []):
-                    continue
-                assigned = model.new_bool_var(f"task_{ti}_{ei}")
-                model.add(assigned <= parent)
-                task_selected[ti, ei] = assigned
-                task_employee_intervals[ei].append((start, end, assigned))
-                available.append(assigned)
+                if task.get("qualification") and task["qualification"] not in employee.get("qualifications", []):
+                    model.add(var == 0)
+                elif task["id"] in employee.get("blocked_tasks", []):
+                    model.add(var == 0)
+                else:
+                    task_selected[ti, ei] = var
+            continue
+
+        ri = shift_slot[(need["date"], need["shift_id"])]
+        start, end = task_bounds(need["date"], need["start"], need["end"],
+                                 shifts[need["shift_id"]]["start"])
+        available = []
+        for ei, employee in enumerate(employees):
+            parent = x.get((ei, ri))
+            if parent is None:
+                continue
+            required_qualification = task.get("qualification", "")
+            if required_qualification and required_qualification not in employee.get("qualifications", []):
+                continue
+            if task["id"] in employee.get("blocked_tasks", []):
+                continue
+            assigned = model.new_bool_var(f"task_{ti}_{ei}")
+            model.add(assigned <= parent)
+            task_selected[ti, ei] = assigned
+            task_employee_intervals[ei].append((start, end, assigned))
+            available.append(assigned)
         opening = model.new_int_var(0, need["required"], f"task_open_{ti}")
         task_open_vars[ti] = opening
         model.add(sum(available) + opening == need["required"])
+        if mode == "released":
+            release_blocks[ri].append((start, end, available))
+
     for ei, blocks in task_employee_intervals.items():
         for (a, b, va), (c, d, vb) in combinations(blocks, 2):
             if a < d and c < b:
                 model.add(va + vb <= 1)
+
+    # Werkelijke minimale dienstbezetting per tijdvak. Wie tijdelijk een taak
+    # buiten de reguliere bezetting uitvoert, wordt daar niet dubbel geteld.
+    # Eén open-plaatsenwaarde per dienst = grootste tekort op enig tijdstip.
+    for ri, req in enumerate(slots):
+        people = sum(eligible_by_slot[ri])
+        if "_task_index" in req:
+            model.add(people + vacancy[ri] == req["required"])
+            continue
+        blocks = release_blocks.get(ri, [])
+        if not blocks:
+            model.add(people + vacancy[ri] == req["required"])
+            continue
+        # Extra inzet kan alleen nodig zijn als er ook daadwerkelijk iemand
+        # tijdelijk vrijgesteld wordt voor een taak.
+        model.add(people <= req["required"] + sum(v for _, _, vs in blocks for v in vs))
+        parent_start, parent_end = get_slot_bounds(req["date"], shifts[req["shift_id"]])
+        cuts = sorted({parent_start, parent_end, *(a for a, _, _ in blocks),
+                       *(b for _, b, _ in blocks)})
+        for a, b in zip(cuts, cuts[1:]):
+            if a == b:
+                continue
+            currently_released = [v for x1, x2, vs in blocks if x1 < b and x2 > a for v in vs]
+            model.add(people - sum(currently_released) + vacancy[ri] >= req["required"])
 
     # Een gewenste werkdag is een zachte voorkeur: geen garantie op inzet.
     for ei, emp in enumerate(employees):
@@ -384,7 +454,8 @@ def solve_month(data: dict) -> PlanResult:
     total_task_places = sum(r["required"] for r in data.get("task_needs", []))
     task_cost = covering_cost
     coverage_cost = (total_task_places + 1) * task_cost
-    model.minimize(coverage_cost * sum(vacancy.values())
+    base_vacancies = [vacancy[ri] for ri, req in enumerate(slots) if "_task_index" not in req]
+    model.minimize(coverage_cost * sum(base_vacancies)
                    + task_cost * sum(task_open_vars.values())
                    + pref_weight * (sum(pref_penalty_terms) + sum(category_targets_penalty))
                    + fair_weight * sum(fairness)
@@ -396,25 +467,37 @@ def solve_month(data: dict) -> PlanResult:
     status = solver.solve(model)
     status_name = solver.status_name(status)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return PlanResult(status_name, [], [], {"required": sum(r["required"] for r in slots), "assigned": 0,
-                                                        "open": None, "solver": status_name})
+        return PlanResult(status_name, [], [], {"required": sum(r["required"] for r in service_slots),
+                                                        "assigned": 0, "open": None, "solver": status_name})
 
     assigned_rows = []
     open_rows = []
+    regular_filled = 0
+    extra_regular = 0
     for ri, req in enumerate(slots):
         sh = shifts[req["shift_id"]]
+        is_standalone = "_task_index" in req
+        assigned_here = 0
         for ei, emp in enumerate(employees):
             var = x.get((ei, ri))
             if var is not None and solver.value(var):
-                assigned_rows.append({"Datum": req["date"], "Dienstnummer": sh["id"],
+                assigned_here += 1
+                assigned_rows.append({"Datum": req["date"],
+                                      "Dienstnummer": ("TAAK:" + data["task_needs"][req["_task_index"]]["task_id"])
+                                                       if is_standalone else sh["id"],
+                                      "Soort": "Zelfstandige taak" if is_standalone else "Reguliere dienst",
                                       "Categorie": sh["category"], "Begin": sh["start"], "Einde": sh["end"],
                                       "Controleur": emp["name"], "Personeelsnr": emp["id"],
                                       "Beginlocatie": sh.get("start_location", sh.get("location", "")),
                                       "Eindlocatie": sh.get("end_location", sh.get("location", "")),
                                       "Uren": round(minutes_between(sh["start"], sh["end"]) / 60, 2)})
         vacant = solver.value(vacancy[ri])
-        if vacant:
-            open_rows.append({"Datum": req["date"], "Dienstnummer": sh["id"], "Categorie": sh["category"], "Open plaatsen": vacant})
+        if not is_standalone:
+            regular_filled += req["required"] - vacant
+            extra_regular += max(0, assigned_here - req["required"])
+            if vacant:
+                open_rows.append({"Datum": req["date"], "Dienstnummer": sh["id"],
+                                  "Categorie": sh["category"], "Open plaatsen": vacant})
 
     filled_tasks, missing_tasks = [], []
     for ti, need in enumerate(data.get("task_needs", [])):
@@ -422,19 +505,22 @@ def solve_month(data: dict) -> PlanResult:
         for ei, emp in enumerate(employees):
             var = task_selected.get((ti, ei))
             if var is not None and solver.value(var):
-                filled_tasks.append({"Datum": need["date"], "Dienstnummer": need["shift_id"],
+                filled_tasks.append({"Datum": need["date"], "Dienstnummer": need.get("shift_id") or "Zelfstandig",
                                      "Taakcode": task["id"], "Taak": task["name"],
+                                     "Soort": need_mode(need),
                                      "Begin": need["start"], "Einde": need["end"],
                                      "Personeelsnr": emp["id"], "Controleur": emp["name"]})
         unfilled = solver.value(task_open_vars[ti])
         if unfilled:
-            missing_tasks.append({"Datum": need["date"], "Dienstnummer": need["shift_id"],
+            missing_tasks.append({"Datum": need["date"], "Dienstnummer": need.get("shift_id") or "Zelfstandig",
                                   "Taakcode": task["id"], "Taak": task["name"],
-                                  "Open taakplaatsen": unfilled})
+                                  "Soort": need_mode(need), "Open taakplaatsen": unfilled})
 
-    required = sum(r["required"] for r in slots)
+    required = sum(r["required"] for r in service_slots)
+    regular_open = sum(r["Open plaatsen"] for r in open_rows)
     return PlanResult(status_name, assigned_rows, open_rows,
-                      {"required": required, "assigned": len(assigned_rows), "open": required - len(assigned_rows),
+                      {"required": required, "assigned": regular_filled, "open": regular_open,
+                       "extra_regular_staffing": extra_regular,
                        "solver": status_name, "seconds": round(solver.wall_time, 2),
                        "objective": round(solver.objective_value, 2),
                        "best_bound": round(solver.best_objective_bound, 2),

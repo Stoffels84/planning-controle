@@ -1,61 +1,69 @@
-# Controleursplanning v0.7 — weekendhistoriek en taakplanning (proefversie)
+# Controleursplanning v0.8 — zelfstandige en tijdelijk vrijgestelde taken
 
-Dit is een **voortzetting van de werkende v0.6.2**, met behoud van inloggen, wachtwoordherstel, bestaande database, voorkeuren, maandgrenzen en OR-Tools. Alleen **fictieve gegevens** gebruiken. Geen gevalideerde productieapplicatie voor De Lijn.
+**Testproject met fictieve gegevens.** Dit bouwt voort op v0.7, met behoud van accounts, PostgreSQL-opslag, bestaande voorkeuren, diensten en OR-Tools-planningslogica. Geen gevalideerde productieapplicatie voor De Lijn.
 
-## Wat is nieuw?
+## Nieuwe mogelijkheden
 
-1. **Historische weekendspreiding:** onder **Planning** kan de beheerder ervoor kiezen om weekenddagen uit de **gepubliceerde** planningen van de vorige 1–12 kalendermaanden te gebruiken. Een conceptversie telt niet mee. Als een maand meerdere gepubliceerde versies heeft, telt alleen de laatst gepubliceerde versie. Historische gegevens worden **uitsluitend voor de berekening geladen**; de eerder handmatig ingevulde historie in het personeelsprofiel wordt niet overschreven. Een dienst op zaterdag en zondag telt als twee weekenddagen en één gewerkt weekend (startdatum is bepalend). Dit is een **eenvoudige** historische eerlijkheidsmaat, niet gecorrigeerd voor alle mogelijke dienst- en arbeidsregimes of tijd in dienst.
-2. **Taken binnen bestaande diensten:** maak taken aan via het nieuwe tabblad **Taken**, eventueel met een verplichte bevoegdheid (kwalificatiecode). Leg vast op welke dag, bij welk dienstnummer, binnen welke uren en met hoeveel medewerkers een taak moet worden uitgevoerd. In **Controleurs > Profiel en beperkingen** kun je bevoegdheden en geblokkeerde taken beheren.
-3. **Automatische taaktoewijzing met OR-Tools:** een taak kan alleen worden toegewezen aan iemand die op dat dienstnummer op die datum is ingepland, de vereiste bevoegdheid heeft en niet voor die taak geblokkeerd is. Eén controleur kan geen twee overlappende taakblokken krijgen. Bij onvoldoende geschikte controleurs toont het resultaat **open taakplaatsen** in plaats van de regels te overtreden.
-4. **Nieuwe Excel-tabbladen:** `Taaktoewijzingen` en `Open taken`.
+In **Taken > Taken per datum** zijn nu drie planningsvormen beschikbaar:
 
-**Belangrijke beperking:** deze versie ondersteunt **uitsluitend taken die binnen een bestaande dienst plaatsvinden en de controleur laten meetellen voor de oorspronkelijke dienstbezetting**. Taken die een volledige dienst vervangen, die de reguliere bezetting verminderen of los van een dienst staan, zijn **nog niet ondersteund**. De planningsmotor houdt nog geen rekening met verplaatsingstijden en officiële arbeidsregelingen. Maak voor zulke taken voorlopig géén taakblok aan, omdat dit een onjuiste bezettingsinterpretatie zou geven.
+| Planningsvorm | Gedrag |
+|---|---|
+| **Binnen dienst — telt mee in bezetting** | Gedrag van v0.7. Taak binnen de uren van een gewone dienst; controleur blijft meetellen voor de reguliere bezetting. |
+| **Binnen dienst — tijdelijke vrijstelling** | Tijdens het taakblok telt de controleur *niet* mee voor de reguliere bezetting. De solver kan extra medewerkers op dezelfde dienst toewijzen om het vereiste aantal beschikbare controleurs te behouden. Indien dat niet lukt, blijft de taak open of meldt de planning een tekort; het systeem telt niemand dubbel mee. |
+| **Zelfstandige opdracht — vervangt gewone dienst** | Opdracht heeft geen dienstnummer en kan op een willekeurige datum binnen de planningsmaand worden toegevoegd. De controleur kan op die kalenderdag geen gewone dienst krijgen. De opdracht telt mee voor uren, rusttijden en de ingestelde categoriegrenzen. |
 
-## Installeren op bestaande GitHub + Streamlit
+Nieuwe taken kunnen een **dienstcategorie** krijgen (Vroeg, Dag, Laat of Nacht) om zelfstandige opdrachten mee te nemen in categorie- en dienstreeksregels. Bestaande taakdefinities zonder categorie krijgen standaard *Dag*; bestaande taakbehoeften zonder planningsvorm blijven **Binnen dienst — telt mee**. Eerder gepubliceerde planningen worden niet aangepast.
 
-1. Bewaar de werkende v0.6.2 als GitHub-tag of branch én maak via de PostgreSQL-provider een echte databaseback-up.
-2. Pak `controleursplanning-github-streamlit-v07.zip` uit. Upload **alle bestanden en mappen** naar de hoofdmap van je bestaande **private** GitHub-repository. Vervang oude bestanden; verwijder niet je andere eigen bestanden.
-3. Nieuwe modules die zeker mee moeten: `history_v07.py` en `tasks_v07.py`. `app.py`, `planner.py`, `catalog.py` en `store.py` zijn ook gewijzigd. `requirements.txt` blijft gelijk.
-4. Streamlit zal na de GitHub-commit opnieuw deployen. Laat `DATABASE_URL` en andere Secrets ongewijzigd. De oude database en accounts blijven bestaan. Er is **geen schema-migratie** nodig: taakgegevens worden in de bestaande JSON-werkruimte bewaard.
-5. Log in met het bestaande beheerdersaccount. Verwijder `ADMIN_RECOVERY_KEY` uit Secrets als dat niet reeds gebeurd is. Gebruik uitsluitend verzonnen testgegevens.
+De taakresultaten tonen nu ook het type (`embedded`, `released` of `standalone`). In de planning staat bij **Reguliere diensten** het aantal effectief gedekte dienstplaatsen; extra medewerkers voor tijdelijke vrijstellingen zijn afzonderlijk zichtbaar. Een zelfstandige opdracht staat in het rooster als `TAAK:<code>` en verschijnt eveneens in het taakoeverzicht, maar **telt in het urenoverzicht slechts één keer**.
 
-## Vier eenvoudige tests
+## Installatie op je bestaande GitHub + Streamlit
 
-### Test 1 — taak en kwalificatie
+1. Bewaar v0.7 als GitHub-tag of branch en maak **een echte databaseback-up** bij je PostgreSQL-provider.
+2. Pak `controleursplanning-github-streamlit-v08.zip` uit.
+3. Upload de volledige inhoud naar de **hoofdmap van dezelfde private GitHub-repository**. Vervang de oude bestanden. Vooral `app.py`, `planner.py` en `tasks_v07.py` zijn bijgewerkt; de naam `tasks_v07.py` blijft bewust behouden voor compatibiliteit.
+4. Laat `DATABASE_URL`, je bestaande gebruikersaccounts en overige Streamlit Secrets ongewijzigd. Laat geen herstelcode (`ADMIN_RECOVERY_KEY`) actief staan.
+5. Open de app opnieuw. Bij deze uitbreiding is **geen databasemigratie** nodig: de nieuwe velden zitten in de bestaande werkruimte.
 
-- Open **Taken** en maak `DEMO_ACTIE` aan, met vereiste kwalificatie `TEST_KWAL`.
-- Open **Controleurs > Profiel en beperkingen**, kies een fictieve controleur, en selecteer bij **Behaalde taakbevoegdheden** `TEST_KWAL`. Sla op.
-- Open **Taken > Taken per datum**, kies een bestaande datum en een dienst die op die datum uitgevoerd wordt. Voeg één taakblok toe binnen de diensturen (voorbeeld: vroege dienst 06:00–14:00 → taak 10:00–11:00). Kies `DEMO_ACTIE` en `1` controleur.
-- Ga naar **Planning**, klik **Bereken maandplanning**, en bekijk **Toegewezen taken** / **Open taakplaatsen**. Alleen een bevoegde én op de juiste dienst ingedeelde controleur mag de taak krijgen. Bij onvoldoende geschikte medewerkers blijft de taak open.
+## Drie gerichte controles met fictieve gegevens
 
-### Test 2 — onbevoegde medewerker
+### Test 1 — Tijdelijke vrijstelling en reservebezetting
 
-- Haal `TEST_KWAL` weg uit alle profielen en bereken opnieuw. De taak moet open blijven. Zorg dat je de wijziging hebt opgeslagen.
+- Zorg dat een fictieve vroege dienst op een datum **2 controleurs vereist**.
+- Zorg dat **minstens 3 geschikte, beschikbare** fictieve controleurs voor deze dienst in aanmerking komen (kwalificaties en andere voorwaarden zijn belangrijk).
+- Maak onder **Taken** een taakblok binnen de diensturen met de planningsvorm **Binnen dienst — tijdelijke vrijstelling**, 1 controleur en een beperkte duur (bijvoorbeeld 10:00–11:00 bij 06:00–14:00).
+- Bereken opnieuw. Als alle voorwaarden dat toelaten, kan de planning 3 medewerkers op de dienst zetten: 1 voor de taak en 2 beschikbaar voor de reguliere bezetting gedurende dat uur. Het dashboard meldt dan **extra medewerkers wegens tijdelijke vrijstelling**.
+- Laat daarna hoogstens 2 geschikte medewerkers beschikbaar zijn en bereken opnieuw. Het systeem mag **niet** doen alsof een vrijgestelde medewerker gelijktijdig voor de gewone bezetting beschikbaar is. De taak kan open blijven.
 
-### Test 3 — gepubliceerde historie
+### Test 2 — Zelfstandige opdracht
 
-- Publiceer een fictieve maandplanning, wijzig onder **Maandbehoefte** de actieve planningsmaand naar de volgende maand en bereken daar een nieuw rooster.
-- Schakel bij **Planning** `Gepubliceerde weekendhistoriek automatisch meewegen` in en kies een venster van 3 maanden. Boven de knop verschijnen de gevonden oudere, gepubliceerde maanden en weekendtellingen.
-- Conceptplanningen tellen niet mee. Na opnieuw publiceren van een herziene maand telt alleen die laatst gepubliceerde versie.
+- Maak in **Taken > Taken per datum** een taakbehoefte met de planningsvorm **Zelfstandige opdracht**, bijvoorbeeld 09:00–17:00, 1 controleur. Er is geen dienstnummer nodig.
+- Bereken. De taak verschijnt in **Toegewezen taken**, en als `TAAK:<code>` in **Diensten en zelfstandige taken**.
+- Controleer dat de betrokken persoon op die datum geen tweede gewone dienst heeft en dat de 8 uur slechts eenmaal meetellen in het urenoverzicht.
 
-### Test 4 — behoud van bestaande gegevens
+### Test 3 — Oude data blijven geldig
 
-- Controleer dat accounts, bestaande diensten, voorkeuren en de PostgreSQL-verbinding onveranderd zijn.
-- Herstel bij problemen de v0.6.2-GitHub-tag/branch. Als je al v0.7-taakvelden hebt opgeslagen, zullen ze door v0.6.2 niet worden gebruikt, maar blijven ze in de werkruimte staan.
+- Controleer een eerder aangemaakte taak uit v0.7 zonder nieuw `mode`-veld. Die moet blijven functioneren alsof **Binnen dienst — telt mee** geselecteerd was.
+- Controleer dat alle accounts, diensten, voorkeuren en historische plannen zichtbaar blijven.
 
-## Technische bestanden
+## Grenzen van deze proefversie
 
-- `app.py`: nieuwe schermen en opties voor historische berekeningen.
-- `history_v07.py`: pure historische aggregatie en berekeningskopie.
-- `tasks_v07.py`: taakdefinities, tijdsblokken en validatie.
-- `planner.py`: extra OR-Tools-variabelen voor taaktoewijzing en open taakplaatsen.
-- `catalog.py`: kwalificaties en persoonlijke taakblokkeringen met terugwaarts compatibele standaardwaarden.
-- `store.py`: read-only historische query op **gepubliceerde** planningversies.
-- `tests/test_v07_history_tasks.py` en `tests/test_v07_solver.py`: regressietests.
+- Een zelfstandige opdracht bezet één volledige kalenderdag qua toewijzing, ook wanneer ze maar enkele uren duurt. Twee korte zelfstandige opdrachten op dezelfde dag voor één controleur kunnen in deze versie dus niet gecombineerd worden.
+- Tijdelijke vrijstellingen worden op basis van exacte tijdsblokken beoordeeld. De gerapporteerde open plaatsen per dienst zijn het **grootste bezettingstekort op enig moment** en niet het aantal cumulatieve ontbrekende medewerkeruren.
+- Geen automatische goedkeuringsstromen of afstemming met feitelijke dienstprestaties bij De Lijn; geen gevalideerde wettelijke arbeidstijd- of rustcontrole over maandgrenzen.
+- Nog geen automatische verplaatsingsberekening, taakverdeling over locaties, echte loon-/urensaldoregeling, achtergrondscheduler of productiebeveiliging. Uitsluitend fictieve testgegevens gebruiken.
 
-## Teststatus en beperkingen
+## Teststatus
 
 - Python-syntax: gecontroleerd.
-- Offline: **36 tests geslaagd; 5 solvermodules overgeslagen** omdat OR-Tools in deze omgeving niet kon worden geïnstalleerd.
-- **De nieuwe taaksolver is hier niet live met OR-Tools uitgevoerd.** Test de taaktoewijzing expliciet op Streamlit vóór verder gebruik.
-- De proefversie ondersteunt nog geen pauzes, salarisadministratie, geldige werk-rustcycli over maandgrenzen, afzonderlijke optimalisatieworkers, goedkeuringsflows, automatische databaseback-ups of een volledige productiebeveiliging. Bedrijfsgebruik vereist toestemming, arbeidsrechtelijke validatie, beveiligingsreview en passende hosting.
+- **42 lokale tests geslaagd; 6 solver-testmodules overgeslagen**, omdat OR-Tools hier niet geïnstalleerd kon worden.
+- De nieuwe solvertests in `tests/test_v08_solver.py` moeten nog in de daadwerkelijke Streamlit/OR-Tools-omgeving uitgevoerd worden. De code is dus niet end-to-end bevestigd.
+
+Commandoregel in een omgeving met de geïnstalleerde vereisten:
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install pytest
+python -m pytest -q
+```
+
+Publiceer geen echte personeelsgegevens op gratis testhosting zonder goedkeuring en passende technische/organisatorische bescherming.

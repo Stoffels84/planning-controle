@@ -18,9 +18,9 @@ import store
 import catalog
 from policy_v06 import weekend_start_dates, hours_overview, service_overview
 from history_v07 import aggregate_history, apply_published_history
-from tasks_v07 import validate_tasks
+from tasks_v07 import validate_tasks, MODES, need_mode
 
-st.set_page_config(page_title="Controleursplanning | v0.7", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.8", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -566,10 +566,10 @@ elif screen == "Diensten":
     st.info("Bij wijziging van de vaste bezetting passen we de behoefte voor de actieve maand aan. Eerder opgeslagen planningsversies blijven bewaard als historisch resultaat; bereken een nieuwe conceptplanning om de gewijzigde diensturen te verwerken.")
 
 elif screen == "Taken":
-    st.subheader("Takencatalogus en taakbehoefte (v0.7)")
-    st.info("In v0.7 worden **alleen taken binnen een bestaande dienst** automatisch toegewezen. "
-            "Een medewerker blijft tijdens zo'n taak meetellen voor de dienstbezetting. "
-            "Vervangende of zelfstandige taken volgen in een volgende versie.")
+    st.subheader("Takencatalogus en taakbehoefte (v0.8)")
+    st.info("Drie taakvormen: binnen de dienst en meetellen, tijdelijk vrijgesteld van reguliere bezetting, "
+            "of een zelfstandige opdracht die die werkdag de gewone dienst vervangt. "
+            "Bij tijdelijke vrijstelling kan OR-Tools een extra controleur op de dienst zetten.")
     tasks = data.get("tasks", [])
     needs = data.get("task_needs", [])
     t1, t2 = st.tabs(["Takencatalogus", "Taken per datum"])
@@ -577,16 +577,19 @@ elif screen == "Taken":
         if tasks:
             st.dataframe(pd.DataFrame([{"Taakcode": t["id"], "Omschrijving": t["name"],
                                         "Bevoegdheid": t.get("qualification", "") or "Geen",
+                                        "Categorie zelfstandige taak": t.get("category", "Dag"),
                                         "Actief": t.get("active", True)} for t in tasks]),
                          hide_index=True, use_container_width=True)
         with st.form("new_task", clear_on_submit=True):
             tid = st.text_input("Nieuwe taakcode", max_chars=40, placeholder="ACTIE01")
             tname = st.text_input("Omschrijving", max_chars=120, placeholder="Fictieve bijzondere controle")
             qual = st.text_input("Vereiste bevoegdheid (leeg = geen)", max_chars=64)
+            category = st.selectbox("Categorie als zelfstandige opdracht", CATEGORIES, index=1)
             if st.form_submit_button("Taak toevoegen"):
                 state = clone()
                 state.setdefault("tasks", []).append({"id": tid.strip(), "name": tname.strip(),
-                                                       "qualification": qual.strip(), "active": True})
+                                                       "qualification": qual.strip(),
+                                                       "category": category, "active": True})
                 replace_and_rerun(state)
         if tasks:
             to_edit = st.selectbox("Taak aanpassen", [t["id"] for t in tasks])
@@ -594,47 +597,67 @@ elif screen == "Taken":
             with st.form("edit_task"):
                 edit_name = st.text_input("Naam", definition["name"], max_chars=120)
                 edit_qual = st.text_input("Bevoegdheid", definition.get("qualification", ""), max_chars=64)
+                edit_category = st.selectbox("Categorie zelfstandige opdracht", CATEGORIES,
+                                             index=CATEGORIES.index(definition.get("category", "Dag")))
                 edit_active = st.checkbox("Taak actief", definition.get("active", True))
                 if st.form_submit_button("Taak aanpassen"):
                     state = clone()
                     target = next(t for t in state["tasks"] if t["id"] == to_edit)
                     target.update({"name": edit_name.strip(), "qualification": edit_qual.strip(),
-                                   "active": edit_active})
+                                   "category": edit_category, "active": edit_active})
                     replace_and_rerun(state)
     with t2:
         if needs:
             st.dataframe(pd.DataFrame(needs), hide_index=True, use_container_width=True)
-        if not tasks or not data["demand"]:
-            st.info("Voeg eerst een taak en een dienst in de maandbehoefte toe.")
+        st.caption("Oude taakblokken zonder type blijven automatisch 'binnen dienst — telt mee'.")
+        if not tasks:
+            st.info("Voeg eerst een taak toe aan de takencatalogus.")
         else:
-            with st.form("add_task_need", clear_on_submit=True):
-                date_options = sorted({r["date"] for r in data["demand"]})
-                on_date = st.selectbox("Datum", date_options)
-                shifts_today = [r["shift_id"] for r in data["demand"] if r["date"] == on_date and r["required"] > 0]
-                shid = st.selectbox("Dienstnummer", shifts_today) if shifts_today else None
-                active_tasks = [t["id"] for t in tasks if t.get("active", True)]
-                taskid = st.selectbox("Taak", active_tasks) if active_tasks else None
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    task_start = st.text_input("Begin (UU:MM)", value="09:00")
-                with col2:
-                    task_end = st.text_input("Einde (UU:MM)", value="10:00")
-                with col3:
-                    required_people = st.number_input("Aantal controleurs", 1, 30, 1)
-                if st.form_submit_button("Taakblok toevoegen", disabled=not (shid and taskid)):
-                    state = clone()
-                    state.setdefault("task_needs", []).append({"date": on_date, "shift_id": shid,
-                                                               "task_id": taskid, "start": task_start.strip(),
-                                                               "end": task_end.strip(), "required": int(required_people)})
-                    replace_and_rerun(state)
+            mode = st.selectbox("Planningsvorm", list(MODES), format_func=lambda m: MODES[m],
+                                key="task_mode_v08")
+            import calendar
+            if mode == "standalone":
+                dates_available = [date(data["year"], data["month"], i).isoformat()
+                                   for i in range(1, calendar.monthrange(data["year"], data["month"])[1] + 1)]
+            else:
+                dates_available = sorted({r["date"] for r in data["demand"] if r["required"] > 0})
+            if not dates_available:
+                st.warning("Er zijn geen actieve diensten om een taak aan te koppelen.")
+            else:
+                on_date = st.selectbox("Datum", dates_available, key="task_date_v08")
+                shifts_today = [r["shift_id"] for r in data["demand"]
+                                if r["date"] == on_date and r["required"] > 0]
+                with st.form("add_task_need", clear_on_submit=True):
+                    shid = None
+                    if mode != "standalone":
+                        shid = st.selectbox("Dienstnummer", shifts_today) if shifts_today else None
+                    else:
+                        st.caption("Deze opdracht heeft geen dienstnummer. De controleur krijgt die dag geen gewone dienst.")
+                    active_tasks = [t["id"] for t in tasks if t.get("active", True)]
+                    taskid = st.selectbox("Taak", active_tasks) if active_tasks else None
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        task_start = st.text_input("Begin (UU:MM)", value="09:00")
+                    with col2:
+                        task_end = st.text_input("Einde (UU:MM)", value="10:00")
+                    with col3:
+                        required_people = st.number_input("Aantal controleurs", 1, 30, 1)
+                    if st.form_submit_button("Taakblok toevoegen", disabled=not (taskid and (mode == "standalone" or shid))):
+                        state = clone()
+                        state.setdefault("task_needs", []).append({"date": on_date, "shift_id": shid,
+                                                                   "task_id": taskid, "mode": mode,
+                                                                   "start": task_start.strip(), "end": task_end.strip(),
+                                                                   "required": int(required_people)})
+                        replace_and_rerun(state)
         if needs:
             choice = st.selectbox("Taakblok verwijderen", range(len(needs)),
-                                  format_func=lambda i: f"{needs[i]['date']} | {needs[i]['shift_id']} | {needs[i]['task_id']}")
+                                  format_func=lambda i: f"{needs[i]['date']} | {needs[i].get('shift_id') or 'Zelfstandig'} | {needs[i]['task_id']} | {MODES.get(need_mode(needs[i]), '?')}")
             if st.button("Verwijder taakblok"):
                 state = clone()
                 state["task_needs"].pop(choice)
                 replace_and_rerun(state)
-        st.caption("Taken worden niet ingepland als er geen geschikte controleur is; open taakplaatsen worden apart gerapporteerd.")
+        st.caption("Een tijdelijke vrijstelling vermindert de beschikbare dienstbezetting tijdens het tijdsblok. "
+                   "Een zelfstandige taak telt voor uren en rust als een aparte daginzet. Open taakplaatsen worden gerapporteerd.")
 
 elif screen == "Maandbehoefte":
     st.subheader("Welke dienstnummers zijn op welke dagen nodig?")
@@ -983,6 +1006,9 @@ elif screen == "Planning":
         a.metric("Benodigde plaatsen", plan.summary["required"])
         b.metric("Toegewezen plaatsen", plan.summary["assigned"])
         c.metric("Openstaande plaatsen", plan.summary["open"] if plan.summary["open"] is not None else "Onbekend")
+        if plan.summary.get("extra_regular_staffing"):
+            st.caption(f"Extra medewerkers op diensten vanwege tijdelijke vrijstellingen: "
+                       f"{plan.summary['extra_regular_staffing']} toewijzingen.")
         if plan.summary.get("task_required"):
             st.caption(f"Bijzondere taken: {plan.summary['task_assigned']} ingevuld, "
                        f"{plan.summary['task_open']} open van {plan.summary['task_required']} plaatsen.")
@@ -990,8 +1016,8 @@ elif screen == "Planning":
             st.caption(f"Weekendhistoriek: {plan.summary.get('history_months', 0)} eerder gepubliceerde maanden verwerkt.")
         if plan.summary.get("seconds") is not None:
             st.caption(f"Rekentijd: {plan.summary['seconds']} seconden | Solver: {plan.summary['solver']}")
-        if plan.assignments or plan.open_positions:
-            t1,t2,t3 = st.tabs(["Ingeplande diensten", "Openstaande plaatsen", "Urenoverzicht (test)"])
+        if plan.assignments or plan.open_positions or plan.task_assignments or plan.open_tasks:
+            t1,t2,t3 = st.tabs(["Diensten en zelfstandige taken", "Openstaande plaatsen", "Urenoverzicht (test)"])
             with t1:
                 assignments = pd.DataFrame(plan.assignments)
                 st.dataframe(assignments, use_container_width=True, hide_index=True, height=440)
