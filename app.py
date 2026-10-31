@@ -19,8 +19,10 @@ import catalog
 from policy_v06 import weekend_start_dates, hours_overview, service_overview
 from history_v07 import aggregate_history, apply_published_history
 from tasks_v07 import validate_tasks, MODES, need_mode
+from optimization_v09 import (WEIGHT_KEYS, DEFAULTS, options_for, with_profile,
+                              compare_row, signature, validate_profiles, roster_signature)
 
-st.set_page_config(page_title="Controleursplanning | v0.8", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.9", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -171,6 +173,7 @@ def replace_data(updated: dict) -> None:
             st.stop()
     st.session_state.project_data = updated
     st.session_state.pop("last_plan", None)
+    st.session_state.pop("alternatives_v09", None)
 
 
 def replace_and_rerun(updated: dict) -> None:
@@ -261,7 +264,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.7 • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.9 • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -298,7 +301,7 @@ with st.sidebar:
     st.divider()
     st.caption("Niet gekoppeld aan systemen van De Lijn.")
 
-screens = (["Overzicht", "Controleurs", "Diensten", "Taken", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Weekend en maandgrenzen", "Planning"]
+screens = (["Overzicht", "Controleurs", "Diensten", "Taken", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Weekend en maandgrenzen", "Planning", "Optimalisatie vergelijken"]
            if is_manager else ["Mijn planning", "Mijn voorkeuren"])
 if PERSISTENT and current_user["role"] == "admin":
     screens += ["Accounts", "Historiek"]
@@ -329,7 +332,7 @@ if screen == "Overzicht":
 
 **In v0.7:** taaktoewijzing binnen bestaande diensten met kwalificatiecontrole en keuze om gepubliceerde weekendhistoriek mee te nemen.
 
-**Nog niet gebouwd:** taken die een dienst vervangen of buiten een bestaande dienst vallen, ruilaanvragen, goedkeuringsstromen, wettelijke validatie, zelfstandige teamplanning, verplichte overgangsregels over maandgrenzen en automatische back-ups. Deze onderdelen volgen in latere versies.""")
+**In v0.8:** tijdelijke vrijstellingen en zelfstandige taken. **In v0.9:** opgeslagen optimalisatieprofielen en meerdere planningsalternatieven met een objectief vergelijkingsdashboard. **Nog niet gebouwd:** ruilaanvragen, goedkeuringsstromen, wettelijke validatie, zelfstandige teamplanning, verplichte overgangsregels over maandgrenzen en automatische back-ups.""")
 
 elif screen == "Controleurs":
     st.subheader("Controleursbeheer")
@@ -928,7 +931,7 @@ elif screen == "Weekend en maandgrenzen":
 
 elif screen == "Planning":
     st.subheader("Automatisch plannen met Google OR-Tools")
-    st.caption("De instellingen hieronder zijn testwaarden, GEEN gevalideerde wettelijke of sectorale minima.")
+    st.caption("De instellingen hieronder zijn testwaarden, GEEN gevalideerde wettelijke of sectorale minima. Meerdere alternatieven vergelijken kan via het onderdeel **Optimalisatie vergelijken**.")
     with st.form("planner_settings"):
         col1,col2,col3 = st.columns(3)
         with col1:
@@ -1045,6 +1048,181 @@ elif screen == "Planning":
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         elif plan.summary["open"] is None:
             st.error("Er is binnen de rekentijd geen bruikbare oplossing gevonden. Probeer de rekentijd te verlengen.")
+
+
+elif screen == "Optimalisatie vergelijken":
+    st.subheader("Alternatieve maandplanningen vergelijken")
+    st.caption("Versie 0.9: kies een of meer optimalisatieprofielen. Elke variant gebruikt exact dezelfde "
+               "dienstbehoefte, medewerkers, taken en harde voorwaarden. Alleen zachte gewichten verschillen.")
+    st.info("Het teamlabel organiseert je profielen. In versie 0.9 wordt nog steeds de **hele gezamenlijke "
+            "maandplanning** met één profiel tegelijk berekend; afzonderlijke gewichten binnen één "
+            "berekening per team volgen later.")
+
+    teams = sorted({str(e.get("team", "")).strip() for e in data["employees"] if str(e.get("team", "")).strip()})
+    team_choices = ["Alle teams"] + [t for t in teams if t != "Alle teams"]
+    tab_compare, tab_profiles = st.tabs(["Alternatieven genereren", "Eigen profielen beheren"])
+
+    with tab_profiles:
+        st.markdown("#### Eigen optimalisatieprofielen")
+        st.caption("Standaardprofielen blijven beschikbaar. Eigen profielen worden opgeslagen in de bestaande PostgreSQL-werkruimte.")
+        customs = data.get("optimization_profiles", [])
+        if customs:
+            st.dataframe(pd.DataFrame([{
+                "Naam": p["name"], "Team": p.get("team", "Alle teams"),
+                "Voorkeur": p["preference_weight"], "Eerlijkheid": p["fairness_weight"],
+                "Uren": p["hours_weight"]
+            } for p in customs]), hide_index=True, use_container_width=True)
+        else:
+            st.caption("Er zijn nog geen eigen profielen opgeslagen.")
+        editing = st.selectbox("Profielbewerking", ["Nieuw profiel"] +
+                               [f"{i + 1}. {p['name']} ({p.get('team', 'Alle teams')})" for i, p in enumerate(customs)],
+                               key="v09_profile_edit_choice")
+        existing_idx = 0 if editing == "Nieuw profiel" else int(editing.split(".", 1)[0])
+        current_profile = None if existing_idx == 0 else customs[existing_idx - 1]
+        # Een apart formulier per selectie maakt het wisselen van profielen voorspelbaar.
+        with st.form(f"v09_edit_form_{existing_idx}"):
+            name = st.text_input("Profielnaam", value=current_profile["name"] if current_profile else "Mijn profiel",
+                                 max_chars=60)
+            prev_team = current_profile.get("team", "Alle teams") if current_profile else "Alle teams"
+            scope = st.selectbox("Teamlabel", team_choices,
+                                 index=team_choices.index(prev_team) if prev_team in team_choices else 0)
+            ca, cb, cc = st.columns(3)
+            with ca:
+                wp = st.slider("Voorkeuren", 0, 100, int(current_profile["preference_weight"]) if current_profile else 25)
+            with cb:
+                wf = st.slider("Eerlijkheid", 0, 100, int(current_profile["fairness_weight"]) if current_profile else 1)
+            with cc:
+                wh = st.slider("Urenstreefdoelen", 0, 100, int(current_profile["hours_weight"]) if current_profile else 0)
+            save = st.form_submit_button("Profiel opslaan", type="primary")
+        if save:
+            candidate = {"name": name.strip(), "team": scope, "preference_weight": int(wp),
+                         "fairness_weight": int(wf), "hours_weight": int(wh)}
+            updated = clone()
+            stored = list(updated.get("optimization_profiles", []))
+            if existing_idx:
+                stored[existing_idx - 1] = candidate
+            else:
+                stored.append(candidate)
+            updated["optimization_profiles"] = stored
+            problems = validate_profiles(updated)
+            if problems:
+                st.error(" ".join(problems))
+            else:
+                replace_and_rerun(updated)
+        if current_profile and st.button("Geselecteerd eigen profiel verwijderen", key=f"v09_del_{existing_idx}"):
+            updated = clone()
+            updated["optimization_profiles"].pop(existing_idx - 1)
+            replace_and_rerun(updated)
+
+    with tab_compare:
+        st.markdown("#### Vergelijkingsberekening")
+        label_team = st.selectbox("Profielen tonen voor", team_choices, key="v09_scope")
+        available = [p for p in options_for(data)
+                     if p.get("team", "Alle teams") in ("Alle teams", label_team)]
+        indices = {p["id"]: p for p in available}
+        default_selection = [p["id"] for p in available[:3]]
+        chosen_ids = st.multiselect("Kies maximaal 4 verschillende profielen", options=list(indices),
+                                    default=default_selection,
+                                    format_func=lambda v: indices[v]["name"] +
+                                    (f" · {indices[v]['team']}" if indices[v].get("team") != "Alle teams" else ""),
+                                    key="v09_selected_profiles")
+        limit_seconds = st.number_input("Maximale rekentijd per alternatief (seconden)",
+                                        min_value=1, max_value=3600,
+                                        value=min(30, int(data["settings"].get("time_limit_seconds", 10))),
+                                        key="v09_seconds")
+        use_history = st.checkbox("Gepubliceerde weekendhistoriek meenemen", value=PERSISTENT,
+                                  disabled=not PERSISTENT, key="v09_history")
+        lookback = st.slider("Aantal historische maanden", 1, 12, 3,
+                             disabled=not use_history, key="v09_lookback")
+        historical = (store.published_plans_before(engine, data["year"], data["month"], lookback)
+                      if PERSISTENT and use_history else [])
+        historical_values = (aggregate_history(historical, [e["id"] for e in data["employees"]])
+                             if use_history else {})
+        calculation_data = apply_published_history(data, historical_values) if use_history else data
+        fingerprint = signature(data, historical)
+        active_comparison = st.session_state.get("alternatives_v09")
+        if active_comparison and active_comparison["fingerprint"] != fingerprint:
+            st.session_state.pop("alternatives_v09", None)
+            active_comparison = None
+            st.warning("De invoer of historische planning is veranderd. Genereer de alternatieven opnieuw.")
+        problems = validate_dataset(data)
+        for problem in problems:
+            st.error(problem)
+        if len(chosen_ids) > 4:
+            st.warning("Selecteer maximaal vier profielen tegelijk.")
+        st.caption("Meerdere berekeningen kunnen samen langer duren. Resultaten worden niet automatisch gepubliceerd "
+                   "of in de database bewaard; je kiest achteraf expliciet één conceptplanning.")
+        can_start = (len(chosen_ids) in range(1, 5) and not problems)
+        if st.button("🚀 Alternatieven berekenen", type="primary", disabled=not can_start):
+            results = []
+            progress = st.progress(0, text="Berekeningen voorbereiden…")
+            for i, identity in enumerate(chosen_ids):
+                target_profile = indices[identity]
+                try:
+                    with st.spinner(f"Optimaliseren: {target_profile['name']}…"):
+                        variation = with_profile(calculation_data, target_profile, int(limit_seconds))
+                        generated = solve_month(variation)
+                    generated.summary.update({
+                        "optimization_profile": target_profile["name"],
+                        "optimization_weights": {k: target_profile[k] for k in WEIGHT_KEYS},
+                        "history_months": len(historical),
+                        "history_lookback": lookback if use_history else 0,
+                    })
+                    results.append({"profile": target_profile, "result": asdict(generated)})
+                except (ValueError, OverflowError) as err:
+                    st.error(f"Profiel {target_profile['name']}: {err}")
+                except Exception:
+                    st.error(f"Profiel {target_profile['name']}: berekening mislukt. Bekijk de Streamlit-logs.")
+                progress.progress(round(100 * (i + 1) / len(chosen_ids)),
+                                  text=f"{i + 1} van {len(chosen_ids)} berekeningen afgerond")
+            st.session_state.alternatives_v09 = {"fingerprint": fingerprint, "items": results}
+            active_comparison = st.session_state.alternatives_v09
+        if active_comparison and active_comparison["items"]:
+            items = active_comparison["items"]
+            table = []
+            for item in items:
+                p = PlanResult(**item["result"])
+                table.append(compare_row(item["profile"], p, calculation_data))
+            st.markdown("#### Resultaten naast elkaar")
+            st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
+            unique_rosters = {roster_signature(PlanResult(**item["result"])) for item in items
+                              if item["result"]["status"] in ("OPTIMAL", "FEASIBLE")}
+            st.caption(f"Verschillende roosters gevonden: {len(unique_rosters)}. Gelijke roosters zijn mogelijk; "
+                       "verschillende gewichten garanderen niet dat de toewijzingen verschillen.")
+            st.caption("De vergelijkingswaarden hebben voor alle profielen dezelfde betekenis: "
+                       "open dienstplaatsen, open taken, ingewilligde of gemiste vrijwensen, "
+                       "spreiding van weekenddagen per contractpercentage en testurenafwijking. "
+                       "Ruwe OR-Tools-doelscores worden bewust niet onderling vergeleken.")
+            eligible_items = [item for item in items
+                              if item["result"]["status"] in ("OPTIMAL", "FEASIBLE")]
+            if eligible_items:
+                selected_idx = st.selectbox("Kies de conceptplanning die je wilt bewaren", list(range(len(eligible_items))),
+                                            format_func=lambda i: eligible_items[i]["profile"]["name"] +
+                                            f" (open: {eligible_items[i]['result']['summary'].get('open', '?')})",
+                                            key="v09_choice_to_save")
+                if st.button("💾 Gekozen alternatief als concept bewaren", key="v09_confirm_plan"):
+                    if st.session_state.alternatives_v09["fingerprint"] != signature(data, historical):
+                        st.error("Invoer veranderd. Genereer de alternatieven opnieuw.")
+                    else:
+                        plan = PlanResult(**eligible_items[selected_idx]["result"])
+                        try:
+                            new_id = (store.save_plan(engine, data, st.session_state.workspace_revision,
+                                                      asdict(plan), current_user["employee_id"])
+                                      if PERSISTENT else None)
+                        except (ValueError, store.ConflictError) as err:
+                            st.error(f"Concept niet opgeslagen: {err}")
+                        except Exception:
+                            st.error("Concept niet opgeslagen. Controleer de databaselogs.")
+                        else:
+                            st.session_state.last_plan = plan
+                            if new_id is not None:
+                                st.session_state.last_plan_id = new_id
+                            st.success("Conceptplanning bewaard. Open nu **Planning** om haar te bekijken "
+                                       "en eventueel expliciet te publiceren.")
+            else:
+                st.warning("Geen bruikbare alternatieven gevonden. Verhoog eventueel de rekentijd of controleer de regels.")
+        elif active_comparison:
+            st.info("Geen resultaten berekend.")
 
 
 elif screen == "Mijn voorkeuren":

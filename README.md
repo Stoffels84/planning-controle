@@ -1,64 +1,53 @@
-# Controleursplanning v0.8 — zelfstandige en tijdelijk vrijgestelde taken
+# Controleursplanning v0.9 — optimalisatieprofielen en vergelijking
 
-**Testproject met fictieve gegevens.** Dit bouwt voort op v0.7, met behoud van accounts, PostgreSQL-opslag, bestaande voorkeuren, diensten en OR-Tools-planningslogica. Geen gevalideerde productieapplicatie voor De Lijn.
+**Proefversie met uitsluitend fictieve gegevens.** Opgebouwd vanaf v0.8, met behoud van de bestaande PostgreSQL-database, accounts, planning, taakvormen, rustdagen en OR-Tools-solver. Niet geschikt om zonder formele toetsing als operationele personeelsplanner bij De Lijn te gebruiken.
 
-## Nieuwe mogelijkheden
+## Wat is nieuw?
 
-In **Taken > Taken per datum** zijn nu drie planningsvormen beschikbaar:
+In het beheerdersmenu staat **Optimalisatie vergelijken** met twee tabbladen:
 
-| Planningsvorm | Gedrag |
-|---|---|
-| **Binnen dienst — telt mee in bezetting** | Gedrag van v0.7. Taak binnen de uren van een gewone dienst; controleur blijft meetellen voor de reguliere bezetting. |
-| **Binnen dienst — tijdelijke vrijstelling** | Tijdens het taakblok telt de controleur *niet* mee voor de reguliere bezetting. De solver kan extra medewerkers op dezelfde dienst toewijzen om het vereiste aantal beschikbare controleurs te behouden. Indien dat niet lukt, blijft de taak open of meldt de planning een tekort; het systeem telt niemand dubbel mee. |
-| **Zelfstandige opdracht — vervangt gewone dienst** | Opdracht heeft geen dienstnummer en kan op een willekeurige datum binnen de planningsmaand worden toegevoegd. De controleur kan op die kalenderdag geen gewone dienst krijgen. De opdracht telt mee voor uren, rusttijden en de ingestelde categoriegrenzen. |
+1. **Eigen profielen beheren.** Naast vier vaste teststrategieën kun je maximaal twintig eigen profielen opslaan, elk met een naam, optioneel teamlabel en drie gewichten: voorkeuren, eerlijke verdeling en urenstreefwaarden. Profielen komen in de bestaande gedeelde PostgreSQL-werkruimte terecht en zijn via de bestaande toegangsrechten alleen door beheerder/planner te beheren.
+2. **Alternatieven genereren.** Kies 1–4 profielen en een rekentijd per variant. De applicatie berekent elke variant achtereenvolgens met exact dezelfde personeels- en dienstgegevens. Optioneel kan eerdere gepubliceerde weekendhistoriek meegenomen worden. Daarna kun je de uitkomsten vergelijken en **één** alternatief expliciet als conceptplanning opslaan. Publiceren blijft een afzonderlijke actie in **Planning**.
 
-Nieuwe taken kunnen een **dienstcategorie** krijgen (Vroeg, Dag, Laat of Nacht) om zelfstandige opdrachten mee te nemen in categorie- en dienstreeksregels. Bestaande taakdefinities zonder categorie krijgen standaard *Dag*; bestaande taakbehoeften zonder planningsvorm blijven **Binnen dienst — telt mee**. Eerder gepubliceerde planningen worden niet aangepast.
+Vergelijking toont consequent: ingevulde dienstplaatsen, openstaande dienstplaatsen, open taken, gerespecteerde/gemiste vrijwensen, spreiding van weekenddagen gecorrigeerd voor contractpercentage, de testafwijking van urenstreefdoelen en rekentijd. De **ruwe OR-Tools-doelfunctiewaarde vergelijken we niet** tussen profielen, omdat verschillende gewichten verschillende doelwaarden opleveren. Uitsluitend vroege/vrije dag- en terugkerende vrijwensen zitten in de vergelijkingskolommen; andere wenscategorieën worden *wel* door de solver meegewogen maar hebben nog geen aparte vergelijkingsindicator.
 
-De taakresultaten tonen nu ook het type (`embedded`, `released` of `standalone`). In de planning staat bij **Reguliere diensten** het aantal effectief gedekte dienstplaatsen; extra medewerkers voor tijdelijke vrijstellingen zijn afzonderlijk zichtbaar. Een zelfstandige opdracht staat in het rooster als `TAAK:<code>` en verschijnt eveneens in het taakoeverzicht, maar **telt in het urenoverzicht slechts één keer**.
+### Vier ingebouwde testprofielen
 
-## Installatie op je bestaande GitHub + Streamlit
+| Profiel | Voorkeuren | Eerlijkheid | Uren | Opmerking |
+| --- | ---: | ---: | ---: | --- |
+| Evenwichtig | 25 | 1 | 0 | Gebaseerd op bestaande testinstellingen |
+| Voorkeuren centraal | 75 | 0 | 0 | Probeert vooral wensen te honoreren |
+| Eerlijke verdeling | 10 | 3 | 0 | Legt nadruk op spreiding |
+| Uren dichter bij streefwaarden | 10 | 1 | 2 | Alleen betekenisvol bij ingevulde urenstreefdoelen |
 
-1. Bewaar v0.7 als GitHub-tag of branch en maak **een echte databaseback-up** bij je PostgreSQL-provider.
-2. Pak `controleursplanning-github-streamlit-v08.zip` uit.
-3. Upload de volledige inhoud naar de **hoofdmap van dezelfde private GitHub-repository**. Vervang de oude bestanden. Vooral `app.py`, `planner.py` en `tasks_v07.py` zijn bijgewerkt; de naam `tasks_v07.py` blijft bewust behouden voor compatibiliteit.
-4. Laat `DATABASE_URL`, je bestaande gebruikersaccounts en overige Streamlit Secrets ongewijzigd. Laat geen herstelcode (`ADMIN_RECOVERY_KEY`) actief staan.
-5. Open de app opnieuw. Bij deze uitbreiding is **geen databasemigratie** nodig: de nieuwe velden zitten in de bestaande werkruimte.
+Dit zijn *voorbeeldgewichten*. In de bestaande solver zijn de interne ruwe strafscores nog niet over doeltypen genormaliseerd. Een gewicht 3 betekent dus **niet letterlijk** drie keer zoveel maatschappelijk belang als een gewicht 1. Deze nauwkeurigere kalibratie hoort bij een latere release.
 
-## Drie gerichte controles met fictieve gegevens
+**Teamlabels zijn nog geen aparte teamoptimalisatie.** In v0.9 kun je een profiel onder een teamlabel bewaren en daarop filteren, maar de gekozen gewichten gelden voor de complete gezamenlijke maandplanning. Gelijktijdig verschillende gewichten per team in één berekening is nog niet ingebouwd.
 
-### Test 1 — Tijdelijke vrijstelling en reservebezetting
+De solver is ongewijzigd voor harde voorwaarden (dienstbezetting, rust, inzetbaarheid, taakbevoegdheden, enzovoort). Veranderen van een profiel heeft daarop geen invloed. Verschillende profielen garanderen **geen verschillende roosters**; als twee berekeningen dezelfde toewijzingen opleveren, zie je dat eerlijk terug in het dashboard.
 
-- Zorg dat een fictieve vroege dienst op een datum **2 controleurs vereist**.
-- Zorg dat **minstens 3 geschikte, beschikbare** fictieve controleurs voor deze dienst in aanmerking komen (kwalificaties en andere voorwaarden zijn belangrijk).
-- Maak onder **Taken** een taakblok binnen de diensturen met de planningsvorm **Binnen dienst — tijdelijke vrijstelling**, 1 controleur en een beperkte duur (bijvoorbeeld 10:00–11:00 bij 06:00–14:00).
-- Bereken opnieuw. Als alle voorwaarden dat toelaten, kan de planning 3 medewerkers op de dienst zetten: 1 voor de taak en 2 beschikbaar voor de reguliere bezetting gedurende dat uur. Het dashboard meldt dan **extra medewerkers wegens tijdelijke vrijstelling**.
-- Laat daarna hoogstens 2 geschikte medewerkers beschikbaar zijn en bereken opnieuw. Het systeem mag **niet** doen alsof een vrijgestelde medewerker gelijktijdig voor de gewone bezetting beschikbaar is. De taak kan open blijven.
+## Installatie bovenop de bestaande v0.8
 
-### Test 2 — Zelfstandige opdracht
+1. Bewaar eerst een herstelpunt van je werkende v0.8 in GitHub en maak een **databaseback-up via je databaseprovider**.
+2. Pak `controleursplanning-github-streamlit-v09.zip` uit. Plaats **alle bestanden** in de hoofdmap van je bestaande *private* GitHub-repository `controleursplanning`, waarbij bestaande bestanden worden vervangen. Voeg het **nieuwe bestand `optimization_v09.py`** toe.
+3. Laat de Streamlit Secrets en `DATABASE_URL` ongewijzigd; je bestaande inloggegevens blijven werken. Verwijder een eventueel achtergebleven `ADMIN_RECOVERY_KEY`.
+4. Open na de Streamlit-herstart het nieuwe onderdeel **Optimalisatie vergelijken**.
+5. Je hoeft **geen nieuwe PostgreSQL-database en geen migratie** aan te maken: nieuwe eigen profielen gebruiken het bestaande JSON-werkruimteveld.
 
-- Maak in **Taken > Taken per datum** een taakbehoefte met de planningsvorm **Zelfstandige opdracht**, bijvoorbeeld 09:00–17:00, 1 controleur. Er is geen dienstnummer nodig.
-- Bereken. De taak verschijnt in **Toegewezen taken**, en als `TAAK:<code>` in **Diensten en zelfstandige taken**.
-- Controleer dat de betrokken persoon op die datum geen tweede gewone dienst heeft en dat de 8 uur slechts eenmaal meetellen in het urenoverzicht.
+## Testscenario met fictieve medewerkers
 
-### Test 3 — Oude data blijven geldig
+1. Open **Optimalisatie vergelijken** en selecteer de drie standaardprofielen `Evenwichtig`, `Voorkeuren centraal` en `Eerlijke verdeling`.
+2. Stel bijvoorbeeld `10 seconden` per profiel in en klik **Alternatieven berekenen**.
+3. Controleer of drie resultaten verschijnen en of het aantal open dienstplaatsen/taken zichtbaar is. **OPTIMAL** en **FEASIBLE** zijn bruikbare solverstatussen; andere statussen zijn geen publiceerbare planning.
+4. Voeg op het tabblad **Eigen profielen beheren** een profiel `Proef 1` toe. Controleer dat dit profiel na het opnieuw openen van de app nog beschikbaar is.
+5. Kies een gevonden alternatief en klik **Gekozen alternatief als concept bewaren**. Open **Planning** en controleer of het juiste concept beschikbaar is. **Publiceer alleen als dat bewust de bedoeling is**.
+6. Wijzig één fictieve voorkeur; oude alternatieven mogen dan niet nogmaals als actuele conceptplanning gekozen kunnen worden.
 
-- Controleer een eerder aangemaakte taak uit v0.7 zonder nieuw `mode`-veld. Die moet blijven functioneren alsof **Binnen dienst — telt mee** geselecteerd was.
-- Controleer dat alle accounts, diensten, voorkeuren en historische plannen zichtbaar blijven.
+Als de testdata nauwelijks flexibiliteit toestaan, kunnen meerdere strategieën precies hetzelfde rooster opleveren; dat is geen bug.
 
-## Grenzen van deze proefversie
+## Technische controles
 
-- Een zelfstandige opdracht bezet één volledige kalenderdag qua toewijzing, ook wanneer ze maar enkele uren duurt. Twee korte zelfstandige opdrachten op dezelfde dag voor één controleur kunnen in deze versie dus niet gecombineerd worden.
-- Tijdelijke vrijstellingen worden op basis van exacte tijdsblokken beoordeeld. De gerapporteerde open plaatsen per dienst zijn het **grootste bezettingstekort op enig moment** en niet het aantal cumulatieve ontbrekende medewerkeruren.
-- Geen automatische goedkeuringsstromen of afstemming met feitelijke dienstprestaties bij De Lijn; geen gevalideerde wettelijke arbeidstijd- of rustcontrole over maandgrenzen.
-- Nog geen automatische verplaatsingsberekening, taakverdeling over locaties, echte loon-/urensaldoregeling, achtergrondscheduler of productiebeveiliging. Uitsluitend fictieve testgegevens gebruiken.
-
-## Teststatus
-
-- Python-syntax: gecontroleerd.
-- **42 lokale tests geslaagd; 6 solver-testmodules overgeslagen**, omdat OR-Tools hier niet geïnstalleerd kon worden.
-- De nieuwe solvertests in `tests/test_v08_solver.py` moeten nog in de daadwerkelijke Streamlit/OR-Tools-omgeving uitgevoerd worden. De code is dus niet end-to-end bevestigd.
-
-Commandoregel in een omgeving met de geïnstalleerde vereisten:
+In de huidige ontwikkelomgeving zijn **50 tests geslaagd en 6 solver-testmodules overgeslagen**, omdat de `ortools`-installatie door netwerkproblemen niet kon plaatsvinden. De app en nieuwe Streamlit-schermen moeten dus nog live getest worden. Met Python 3.11+ en internettoegang kun je de volledige tests uitvoeren:
 
 ```bash
 python -m pip install -r requirements.txt
@@ -66,4 +55,4 @@ python -m pip install pytest
 python -m pytest -q
 ```
 
-Publiceer geen echte personeelsgegevens op gratis testhosting zonder goedkeuring en passende technische/organisatorische bescherming.
+Alleen fictieve gegevens gebruiken; live personeelsgegevens vereisen goedgekeurde hosting, toegangsbeveiliging, back-ups en toetsing van arbeidstijd-/rustregels door De Lijn.

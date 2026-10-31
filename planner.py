@@ -22,6 +22,7 @@ from catalog import (is_unavailable_during, profile, settings_with_defaults, tra
 from extras import preference_type, rest_blocked_during, validate_extras
 from policy_v06 import touches_protected_weekend, saturday_for
 from tasks_v07 import task_bounds, validate_tasks, need_mode, standalone_code, standalone_bounds
+from optimization_v09 import validate_profiles
 
 
 @dataclass
@@ -94,6 +95,7 @@ def validate_dataset(data: dict) -> list[str]:
             errors.append(f"Voorkeur verwijst naar onbekende controleur: {p['employee_id']}.")
     errors.extend(validate_extras(data))
     errors.extend(validate_tasks(data))
+    errors.extend(validate_profiles(data))
     return errors
 
 
