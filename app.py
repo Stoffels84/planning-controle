@@ -35,8 +35,9 @@ from portal_v016 import (month_weeks, preference_summary, week_choices, save_wee
 from portal_v017 import month_tiles, personal_publication_changes, personal_request_feed, WEEKDAYS as CALENDAR_DAYS
 from report_v019 import build_report, safe_excel_rows
 from diagnostics_v021 import analyze_month, explain_open_positions
+from locks_v022 import assignment_key, validate_locks, reoptimization_diff
 
-st.set_page_config(page_title="Controleursplanning | v0.21", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.22", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -458,7 +459,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.21 • Haalbaarheidsanalyse en gerichte knelpunten • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.22 • Gerichte heroptimalisatie met vaste diensten • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -1403,6 +1404,115 @@ elif screen == "Planning":
                                 st.error(str(error))
                 except ValueError as error:
                     st.error(f"Publicatievoorbeeld niet beschikbaar: {error}")
+        # v0.22: gedeeltelijk vastzetten en alleen de overige plekken heroptimaliseren.
+        # Een nieuwe berekening wordt altijd een NIEUW concept; een bestaande
+        # publicatie en haar meldingen worden nooit in-place aangepast.
+        if plan_record and PERSISTENT:
+            with st.expander("🔒 Diensten vastzetten en overige heroptimaliseren (v0.22)", expanded=False):
+                st.caption("Kies bestaande toewijzingen die exact moeten blijven staan. "
+                           "Andere toewijzingen mogen wisselen. Je kunt ook één nieuwe "
+                           "toewijzing handmatig vastzetten. De solver controleert nog steeds "
+                           "alle rust-, beschikbaarheids-, uren- en taakregels.")
+                if plan_record["published"]:
+                    st.info("Dit rooster is gepubliceerd. Heroptimalisatie maakt een NIEUW concept "
+                            "en past de gepubliceerde versie niet aan.")
+                if plan_record["revision"] != st.session_state.workspace_revision:
+                    st.warning("Dit rooster gebruikt verouderde invoer. Bereken eerst een nieuwe "
+                               "maandplanning voordat je diensten vastzet.")
+                elif (plan.summary or {}).get("boundary_sources") != boundary_context["sources"]:
+                    st.warning("De aangrenzende maandplanning is veranderd. Bereken eerst "
+                               "opnieuw met de actuele maandgrensgegevens.")
+                else:
+                    pinned_before = {assignment_key(r) for r in
+                                     (plan.summary or {}).get("locked_assignments", [])}
+                    current_regular = [r for r in plan.assignments if
+                                       r.get("Soort") != "Zelfstandige taak"
+                                       and not str(r.get("Dienstnummer", "")).startswith("TAAK:")]
+                    table_rows = [{"Vastzetten": assignment_key(r) in pinned_before,
+                                   "Datum": r["Datum"], "Dienstnummer": r["Dienstnummer"],
+                                   "Controleur": r.get("Controleur", ""),
+                                   "Personeelsnr": r["Personeelsnr"]}
+                                  for r in sorted(current_regular, key=lambda r: assignment_key(r))]
+                    available_slots = sorted((r["date"], r["shift_id"])
+                                             for r in data["demand"] if r["required"] > 0)
+                    active_people = {e["id"]: e["name"] for e in data["employees"] if e.get("active", True)}
+                    with st.form(f"partial_reopt_v022_{plan_record['id']}"):
+                        st.markdown("**Bestaande toewijzingen behouden**")
+                        if table_rows:
+                            edited = st.data_editor(
+                                pd.DataFrame(table_rows), hide_index=True, use_container_width=True,
+                                height=360, num_rows="fixed",
+                                column_order=["Vastzetten", "Datum", "Dienstnummer", "Controleur", "Personeelsnr"],
+                                disabled=["Datum", "Dienstnummer", "Controleur", "Personeelsnr"],
+                                column_config={"Vastzetten": st.column_config.CheckboxColumn(
+                                    "Vastzetten", help="Deze controleur blijft op deze dienst staan.")},
+                                key=f"reopt_editor_v022_{plan_record['id']}")
+                        else:
+                            edited = pd.DataFrame(columns=["Vastzetten"])
+                            st.info("Deze versie heeft nog geen vaste diensttoewijzingen.")
+                        st.markdown("**Eventueel één dienst handmatig toewijzen en vastzetten**")
+                        add_manual = st.checkbox("Een extra dienst handmatig vastzetten", value=False)
+                        selected_slot = st.selectbox(
+                            "Datum en dienstnummer", options=available_slots,
+                            format_func=lambda slot: f"{slot[0]} · {slot[1]}",
+                            disabled=not available_slots)
+                        chosen_employee = st.selectbox(
+                            "Controleur", options=list(active_people),
+                            format_func=lambda eid: f"{active_people[eid]} ({eid})",
+                            disabled=not active_people)
+                        agreed = st.checkbox("Ik begrijp dat dit een nieuw concept oplevert; "
+                                             "gepubliceerde planningen wijzigen niet.")
+                        submit_partial = st.form_submit_button(
+                            "🔄 Heroptimaliseer met vaste toewijzingen", type="primary",
+                            disabled=not (available_slots and active_people))
+                    if submit_partial:
+                        try:
+                            if not agreed:
+                                raise ValueError("Bevestig eerst dat je een nieuw concept gaat berekenen.")
+                            selected = [dict(zip(("Datum", "Dienstnummer", "Personeelsnr"),
+                                                 (r["Datum"], r["Dienstnummer"], r["Personeelsnr"])))
+                                        for r in edited.to_dict("records") if bool(r.get("Vastzetten"))]
+                            if add_manual:
+                                if selected_slot is None or chosen_employee is None:
+                                    raise ValueError("Kies een dienst en een controleur voor de manuele toewijzing.")
+                                selected.append({"Datum": selected_slot[0],
+                                                 "Dienstnummer": selected_slot[1],
+                                                 "Personeelsnr": chosen_employee})
+                            selected = validate_locks(data, selected)
+                            if not selected:
+                                raise ValueError("Zet minstens één dienst vast. Voor volledig opnieuw plannen "
+                                                 "gebruik je 'Bereken maandplanning'.")
+                            with st.spinner("Harde planningsregels controleren en vrije plaatsen berekenen…"):
+                                calculation_data = apply_published_history(data, historic) if auto_history else data
+                                calculation_data = with_boundary_context(calculation_data, boundary_context)
+                                new_plan = solve_month(calculation_data, locked_assignments=selected)
+                                if new_plan.status not in ("OPTIMAL", "FEASIBLE"):
+                                    raise ValueError("Deze vaste combinaties leveren binnen de rekentijd "
+                                                     "geen geldige planning op. De vorige planning blijft bestaan.")
+                                changes = reoptimization_diff(plan.assignments, new_plan.assignments, selected)
+                                if not changes["alle_vaste_behouden"]:
+                                    raise ValueError("Niet alle vaste toewijzingen komen terug in het resultaat.")
+                                new_plan.summary.update({"boundary_sources": boundary_context["sources"],
+                                                         "history_months": len(past_plans),
+                                                         "history_lookback": months_back if auto_history else 0,
+                                                         "locked_assignments": selected,
+                                                         "reoptimized_from": plan_record["id"],
+                                                         "reoptimization_diff": changes})
+                                store.save_plan(engine, data, st.session_state.workspace_revision,
+                                                asdict(new_plan), current_user["employee_id"])
+                            st.session_state.last_plan = new_plan
+                            st.rerun()
+                        except (ValueError, store.ConflictError) as error:
+                            st.error(f"Gerichte heroptimalisatie niet uitgevoerd: {error}")
+                        except Exception:
+                            logging.exception("REOPT_V022: gerichte heroptimalisatie mislukt")
+                            st.error("Gerichte heroptimalisatie is mislukt. De vorige versie bleef behouden. "
+                                     "Bekijk de Streamlit-logboeken bij REOPT_V022.")
+                details = (plan.summary or {}).get("reoptimization_diff")
+                if details:
+                    st.caption(f"Vorig concept #{plan.summary.get('reoptimized_from', '?')} · "
+                               f"{details['vastgezet']} vast · {details['behouden']} behouden · "
+                               f"{details['nieuw']} toegevoegd · {details['weggevallen']} weggevallen")
         a,b,c = st.columns(3)
         a.metric("Benodigde plaatsen", plan.summary["required"])
         b.metric("Toegewezen plaatsen", plan.summary["assigned"])

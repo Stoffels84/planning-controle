@@ -24,6 +24,7 @@ from policy_v06 import touches_protected_weekend, saturday_for
 from tasks_v07 import task_bounds, validate_tasks, need_mode, standalone_code, standalone_bounds
 from optimization_v09 import validate_profiles
 from boundary_v015 import validate_boundary_rows
+from locks_v022 import assignment_key, validate_locks
 
 
 @dataclass
@@ -101,10 +102,14 @@ def validate_dataset(data: dict) -> list[str]:
     return errors
 
 
-def solve_month(data: dict, fixed_plan: dict | None = None) -> PlanResult:
+def solve_month(data: dict, fixed_plan: dict | None = None,
+                locked_assignments: list[dict] | None = None) -> PlanResult:
     errors = validate_dataset(data)
     if errors:
         raise ValueError("\n".join(errors))
+    if fixed_plan is not None and locked_assignments is not None:
+        raise ValueError("Volledige ruilverificatie en gedeeltelijke vergrendeling mogen niet worden gecombineerd.")
+    locked = validate_locks(data, locked_assignments or [])
 
     employees = [profile(e) for e in data["employees"] if e.get("active", True)]
     shifts = {s["id"]: s for s in data["shifts"]}
@@ -531,6 +536,22 @@ def solve_month(data: dict, fixed_plan: dict | None = None) -> PlanResult:
         dev = model.new_int_var(0, deviation_bound, f"weekend_{ei}")
         model.add_abs_equality(dev, staff_count * normalized[ei] - total_normalized)
         fairness.append(dev)
+
+    # v0.22 — alleen de UITDRUKKELIJK gekozen reguliere toewijzingen zijn hard.
+    # Alle andere x-variabelen, inclusief niet-geselecteerde oorspronkelijke
+    # toewijzingen, blijven volledig vrij voor de optimizer.
+    if locked:
+        requested = {assignment_key(r) for r in locked}
+        possible = {(str(req["date"]), str(req["shift_id"]), emp["id"]): var
+                    for (ei, ri), var in x.items()
+                    for req, emp in ((slots[ri], employees[ei]),)
+                    if "_task_index" not in req}
+        unknown = requested - possible.keys()
+        if unknown:
+            d, sid, eid = sorted(unknown)[0]
+            raise ValueError(f"Vaste dienst {sid} op {d} voor {eid} is niet inzetbaar volgens de huidige individuele regels.")
+        for key in requested:
+            model.add(possible[key] == 1)
 
     # v0.11: controleer ruilen door het HELE gepubliceerde rooster vast te pinnen.
     # Dit gebruikt exact dezelfde harde constraints als de maandplanning.
