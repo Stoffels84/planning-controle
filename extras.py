@@ -11,6 +11,7 @@ from demo_data import CATEGORIES
 
 PREFERENCE_TYPES = {
     "free_day": "Gewenste vrije dag",
+    "daily_shift": "Gewenst dienstnummer op datum",
     "work_day": "Gewenste werkdag",
     "category": "Dienstcategorie (liefst / vermijden)",
     "shift": "Dienstnummer (liefst / vermijden)",
@@ -27,7 +28,7 @@ def preference_type(p: dict) -> str:
 
 def preference_identity(p: dict) -> tuple:
     kind = preference_type(p)
-    key = {"free_day": (p.get("date"),), "work_day": (p.get("date"),),
+    key = {"free_day": (p.get("date"),), "daily_shift": (p.get("date"),), "work_day": (p.get("date"),),
            "category": (p.get("category"), p.get("direction")),
            "shift": (p.get("shift_id"), p.get("direction")),
            "weekly_free": (p.get("weekday"),),
@@ -39,6 +40,8 @@ def preference_description(p: dict) -> str:
     kind = preference_type(p)
     if kind in ("free_day", "work_day"):
         return p.get("date", "")
+    if kind == "daily_shift":
+        return f"{p.get('date', '')} — dienst {p.get('shift_id', '')}"
     if kind == "category":
         return ("Liefst " if p.get("direction") == "prefer" else "Vermijd ") + p.get("category", "")
     if kind == "shift":
@@ -64,10 +67,15 @@ def validate_extras(data: dict) -> list[str]:
         if p.get("employee_id") not in eids or type(p.get("priority")) is not int or not 1 <= p["priority"] <= 3:
             errors.append(f"Voorkeur {i}: ongeldige controleur of prioriteit.")
         try:
-            if kind in ("free_day", "work_day"):
+            if kind in ("free_day", "work_day", "daily_shift"):
                 d = date.fromisoformat(p["date"])
                 if (d.year, d.month) != (year, month):
                     errors.append(f"Voorkeur {i}: datum buiten planningsmaand.")
+                if kind == "daily_shift" and (not isinstance(p.get("shift_id"), str)
+                                             or not p["shift_id"].strip()):
+                    errors.append(f"Voorkeur {i}: ongeldig dienstnummer op datum.")
+                # Eerder gekozen diensten mogen later verdwijnen uit de catalogus:
+                # toon ze als verouderd in het formulier; blokkeer geen dienstbeheer.
             elif kind == "category":
                 if p.get("category") not in CATEGORIES or p.get("direction") not in ("prefer", "avoid"):
                     errors.append(f"Voorkeur {i}: ongeldige categorie of richting.")

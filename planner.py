@@ -297,6 +297,24 @@ def solve_month(data: dict) -> PlanResult:
             currently_released = [v for x1, x2, vs in blocks if x1 < b and x2 > a for v in vs]
             model.add(people - sum(currently_released) + vacancy[ri] >= req["required"])
 
+    # Daggebonden dienstwens: eenmalige bonus/penalty voor precies die datum
+    # en dat dienstnummer. Niet alleen een straf voor 'de verkeerde dienst':
+    # ook een volledige vrije dag geldt als niet-ingewilligde dienstwens.
+    for ei, emp in enumerate(employees):
+        for pref in preferences_by_employee[emp["id"]]:
+            if preference_type(pref) != "daily_shift":
+                continue
+            matching_requests = [ri for ri, req in enumerate(slots)
+                                 if "_task_index" not in req and
+                                 req["date"] == pref["date"] and
+                                 req["shift_id"] == pref["shift_id"]]
+            if not matching_requests:
+                # Een oud dienstnummer is inmiddels uit de maandbehoefte gehaald.
+                # Deze verouderde wens mag de huidige berekening niet beïnvloeden.
+                continue
+            matching_assignments = [x[ei, ri] for ri in matching_requests if (ei, ri) in x]
+            pref_penalty_terms.append(10 * int(pref["priority"]) * (1 - sum(matching_assignments)))
+
     # Een gewenste werkdag is een zachte voorkeur: geen garantie op inzet.
     for ei, emp in enumerate(employees):
         for pref in preferences_by_employee[emp["id"]]:

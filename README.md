@@ -1,58 +1,53 @@
-# Controleursplanning v0.9 — optimalisatieprofielen en vergelijking
+# Controleursplanning v0.9.1 — concrete dienstvoorkeur per dag
 
-**Proefversie met uitsluitend fictieve gegevens.** Opgebouwd vanaf v0.8, met behoud van de bestaande PostgreSQL-database, accounts, planning, taakvormen, rustdagen en OR-Tools-solver. Niet geschikt om zonder formele toetsing als operationele personeelsplanner bij De Lijn te gebruiken.
+**Proefversie, uitsluitend met fictieve gegevens.** Voortbouwend op werkende v0.9. Bestaande PostgreSQL-database, accounts, opgeslagen plannen en OR-Tools-regels worden behouden. Gebruik nooit ongetoetste arbeidsregels of een openbare testomgeving voor echte personeelsgegevens.
 
-## Wat is nieuw?
+## Nieuw: dagelijks dienstnummer kiezen
 
-In het beheerdersmenu staat **Optimalisatie vergelijken** met twee tabbladen:
+Op **Mijn voorkeuren** (controleur) en **Voorkeuren** (planner/beheerder) zie je nu eerst een maandoverzicht, gegroepeerd per kalenderweek. Voor iedere dag kan de controleur kiezen tussen:
 
-1. **Eigen profielen beheren.** Naast vier vaste teststrategieën kun je maximaal twintig eigen profielen opslaan, elk met een naam, optioneel teamlabel en drie gewichten: voorkeuren, eerlijke verdeling en urenstreefwaarden. Profielen komen in de bestaande gedeelde PostgreSQL-werkruimte terecht en zijn via de bestaande toegangsrechten alleen door beheerder/planner te beheren.
-2. **Alternatieven genereren.** Kies 1–4 profielen en een rekentijd per variant. De applicatie berekent elke variant achtereenvolgens met exact dezelfde personeels- en dienstgegevens. Optioneel kan eerdere gepubliceerde weekendhistoriek meegenomen worden. Daarna kun je de uitkomsten vergelijken en **één** alternatief expliciet als conceptplanning opslaan. Publiceren blijft een afzonderlijke actie in **Planning**.
+- **Geen voorkeur**: de planner kiest een dienst of rustdag volgens overige regels.
+- **Liefst vrij**: een zachte vrijwens; geen goedgekeurd verlof.
+- **Een concreet dienstnummer**, bijvoorbeeld `V101 · 06:00–14:00` of `D201 · 09:00–17:00`.
 
-Vergelijking toont consequent: ingevulde dienstplaatsen, openstaande dienstplaatsen, open taken, gerespecteerde/gemiste vrijwensen, spreiding van weekenddagen gecorrigeerd voor contractpercentage, de testafwijking van urenstreefdoelen en rekentijd. De **ruwe OR-Tools-doelfunctiewaarde vergelijken we niet** tussen profielen, omdat verschillende gewichten verschillende doelwaarden opleveren. Uitsluitend vroege/vrije dag- en terugkerende vrijwensen zitten in de vergelijkingskolommen; andere wenscategorieën worden *wel* door de solver meegewogen maar hebben nog geen aparte vergelijkingsindicator.
+De lijst bevat **uitsluitend de diensten die de beheerder voor die specifieke datum in `Maandbehoefte` heeft ingepland**, dus niet alle mogelijke diensten uit de catalogus. Er wordt niet alleen op categorie ‘vroeg’ of ‘laat’ gekozen. Je kunt per dag ook een prioriteit `Laag`, `Normaal` of `Hoog` instellen. Bewaar alle dagwensen in één keer met **Alle dienstwensen voor deze maand opslaan**. Ongewijzigde dagen hebben standaard `Geen voorkeur`; bestaande vrije-dag-wensen worden in hetzelfde overzicht geladen.
 
-### Vier ingebouwde testprofielen
+**Zachte wens, geen vaste toewijzing.** In de planningsmotor krijgt een voorkeur voor datum + dienstnummer een strafscore wanneer precies die combinatie niet aan de medewerker wordt toegewezen, óók als de medewerker die dag niet werkt. De solver respecteert altijd de harde rust-, inzetbaarheids- en bezettingsvoorwaarden. Een selectie kan dus niet gegarandeerd worden.
 
-| Profiel | Voorkeuren | Eerlijkheid | Uren | Opmerking |
-| --- | ---: | ---: | ---: | --- |
-| Evenwichtig | 25 | 1 | 0 | Gebaseerd op bestaande testinstellingen |
-| Voorkeuren centraal | 75 | 0 | 0 | Probeert vooral wensen te honoreren |
-| Eerlijke verdeling | 10 | 3 | 0 | Legt nadruk op spreiding |
-| Uren dichter bij streefwaarden | 10 | 1 | 2 | Alleen betekenisvol bij ingevulde urenstreefdoelen |
+Bestaande andere voorkeuren (zoals wekelijks liefst vrij en ongewenste overgangen) blijven beschikbaar onder **Overige voorkeuren (optioneel)**. Voor controleurs zijn de oude algemene categorie- en dienstnummerkeuzes niet meer als nieuwe optie zichtbaar: de voorkeur voor een specifiek dienstnummer geef je per datum op. Reeds bestaande algemene voorkeuren blijven behouden en zijn onder de overige voorkeuren nog verwijderbaar. De planner kan die nog beheren.
 
-Dit zijn *voorbeeldgewichten*. In de bestaande solver zijn de interne ruwe strafscores nog niet over doeltypen genormaliseerd. Een gewicht 3 betekent dus **niet letterlijk** drie keer zoveel maatschappelijk belang als een gewicht 1. Deze nauwkeurigere kalibratie hoort bij een latere release.
+Voor een dienstnummer dat later uit de `Maandbehoefte` wordt gehaald, verschijnt een waarschuwing in het voorkeurenportaal. Een gebruiker kan dan een andere dienst kiezen of de vervallen voorkeur wissen. De vergelijking van alternatieve planningen toont voortaan ook **Dagelijkse dienstwensen ingewilligd/gemist**. Verouderde wensen tellen niet mee.
 
-**Teamlabels zijn nog geen aparte teamoptimalisatie.** In v0.9 kun je een profiel onder een teamlabel bewaren en daarop filteren, maar de gekozen gewichten gelden voor de complete gezamenlijke maandplanning. Gelijktijdig verschillende gewichten per team in één berekening is nog niet ingebouwd.
+## Installatie bovenop je werkende v0.9
 
-De solver is ongewijzigd voor harde voorwaarden (dienstbezetting, rust, inzetbaarheid, taakbevoegdheden, enzovoort). Veranderen van een profiel heeft daarop geen invloed. Verschillende profielen garanderen **geen verschillende roosters**; als twee berekeningen dezelfde toewijzingen opleveren, zie je dat eerlijk terug in het dashboard.
+1. Maak eerst een GitHub-herstelpunt van v0.9 en een **back-up van de PostgreSQL-database**.
+2. Pak `controleursplanning-github-streamlit-v091.zip` uit en upload de volledige inhoud naar de hoofdmap van je **bestaande private GitHub-repository**. Vervang de gewijzigde bestanden.
+3. **Nieuw bestand: `daily_v091.py`**. Verder gewijzigd: `app.py`, `extras.py`, `planner.py`, `optimization_v09.py` en `README.md`. `requirements.txt` blijft ongewijzigd.
+4. Laat `DATABASE_URL`, alle andere Streamlit Secrets en de bestaande PostgreSQL-database **ongewijzigd**. Een databasemigratie is niet nodig omdat de wensen in de bestaande JSON-werkruimte opgeslagen worden.
+5. Laat Streamlit de bijgewerkte repository openen of herstart de applicatie indien nodig.
 
-## Installatie bovenop de bestaande v0.8
+## Praktische test
 
-1. Bewaar eerst een herstelpunt van je werkende v0.8 in GitHub en maak een **databaseback-up via je databaseprovider**.
-2. Pak `controleursplanning-github-streamlit-v09.zip` uit. Plaats **alle bestanden** in de hoofdmap van je bestaande *private* GitHub-repository `controleursplanning`, waarbij bestaande bestanden worden vervangen. Voeg het **nieuwe bestand `optimization_v09.py`** toe.
-3. Laat de Streamlit Secrets en `DATABASE_URL` ongewijzigd; je bestaande inloggegevens blijven werken. Verwijder een eventueel achtergebleven `ADMIN_RECOVERY_KEY`.
-4. Open na de Streamlit-herstart het nieuwe onderdeel **Optimalisatie vergelijken**.
-5. Je hoeft **geen nieuwe PostgreSQL-database en geen migratie** aan te maken: nieuwe eigen profielen gebruiken het bestaande JSON-werkruimteveld.
+1. Log in met een **fictief controleursaccount**. Open **Mijn voorkeuren**.
+2. Ga naar een weekdag waarop meerdere diensten beschikbaar zijn; kies bijvoorbeeld `V102` in plaats van `V101`. Geef die wens prioriteit **Hoog**.
+3. Kies op een andere datum **Liefst vrij**. Klik onderaan op **Alle dienstwensen voor deze maand opslaan**.
+4. Open het scherm opnieuw: alle gekozen dienstnummers en prioriteiten moeten bewaard zijn.
+5. Log in als beheerder. Controleer dezelfde medewerker onder **Voorkeuren**. Klik **Bereken maandplanning**.
+6. In **Optimalisatie vergelijken** verschijnen ook de aantallen ingewilligde en gemiste dagelijkse dienstwensen. Controleer of de persoonlijke keuze als *zachte voorkeur* wordt meegewogen. Een dienst kan alleen worden toegewezen wanneer alle harde regels dit toestaan.
+7. Verwijder voor één testdatum een dienst uit **Maandbehoefte** en controleer dat de oude wens als verouderd wordt gesignaleerd en kan worden vervangen.
 
-## Testscenario met fictieve medewerkers
-
-1. Open **Optimalisatie vergelijken** en selecteer de drie standaardprofielen `Evenwichtig`, `Voorkeuren centraal` en `Eerlijke verdeling`.
-2. Stel bijvoorbeeld `10 seconden` per profiel in en klik **Alternatieven berekenen**.
-3. Controleer of drie resultaten verschijnen en of het aantal open dienstplaatsen/taken zichtbaar is. **OPTIMAL** en **FEASIBLE** zijn bruikbare solverstatussen; andere statussen zijn geen publiceerbare planning.
-4. Voeg op het tabblad **Eigen profielen beheren** een profiel `Proef 1` toe. Controleer dat dit profiel na het opnieuw openen van de app nog beschikbaar is.
-5. Kies een gevonden alternatief en klik **Gekozen alternatief als concept bewaren**. Open **Planning** en controleer of het juiste concept beschikbaar is. **Publiceer alleen als dat bewust de bedoeling is**.
-6. Wijzig één fictieve voorkeur; oude alternatieven mogen dan niet nogmaals als actuele conceptplanning gekozen kunnen worden.
-
-Als de testdata nauwelijks flexibiliteit toestaan, kunnen meerdere strategieën precies hetzelfde rooster opleveren; dat is geen bug.
+Let op: gebruikers kunnen alleen wensen kiezen voor de **actieve demonstratiemaand**. Beheer van afzonderlijke maandarchieven, indiendeadlines en de volledige operationele bedrijfsregels volgen later.
 
 ## Technische controles
 
-In de huidige ontwikkelomgeving zijn **50 tests geslaagd en 6 solver-testmodules overgeslagen**, omdat de `ortools`-installatie door netwerkproblemen niet kon plaatsvinden. De app en nieuwe Streamlit-schermen moeten dus nog live getest worden. Met Python 3.11+ en internettoegang kun je de volledige tests uitvoeren:
+- `57 passed, 7 skipped` in de beschikbare ontwikkelomgeving (pytest). De overgeslagen testmodules vereisen **Google OR-Tools**, dat in deze container niet geïnstalleerd is.
+- De Streamlit-UI en de daadwerkelijke OR-Tools-berekening moeten op de online proefapp getest worden.
+- Geen databasemigratie, geen verandering aan wachtwoorden of accounts; opgeslagen wensen blijven gekoppeld aan het bestaande personeelsnummer.
+
+Volledige test lokaal met geïnstalleerde afhankelijkheden:
 
 ```bash
 python -m pip install -r requirements.txt
 python -m pip install pytest
 python -m pytest -q
 ```
-
-Alleen fictieve gegevens gebruiken; live personeelsgegevens vereisen goedgekeurde hosting, toegangsbeveiliging, back-ups en toetsing van arbeidstijd-/rustregels door De Lijn.

@@ -129,6 +129,18 @@ def compare_row(profile: dict, plan, data: dict) -> dict:
                 free_days_missed += 1
             else:
                 free_days_met += 1
+    # Daggebonden dienstwensen vergelijken op exact dienstnummer én datum.
+    # Een wens voor een inmiddels geschrapte dienst telt niet mee in de cijfers.
+    offered = {(req["date"], req["shift_id"]) for req in data.get("demand", []) if req["required"] > 0}
+    daily_met = daily_missed = 0
+    for p in data.get("preferences", []):
+        if p.get("type") != "daily_shift" or (p.get("date"), p.get("shift_id")) not in offered:
+            continue
+        assignments = by_emp_day.get((p["employee_id"], p["date"]), [])
+        if any(a["Dienstnummer"] == p["shift_id"] for a in assignments):
+            daily_met += 1
+        else:
+            daily_missed += 1
     active = [e for e in data["employees"] if e.get("active", True)]
     normalized_weekends = [len(weekends[e["id"]]) / (float(e.get("contract_percent", 100)) / 100)
                            for e in active if float(e.get("contract_percent", 100)) > 0]
@@ -153,6 +165,8 @@ def compare_row(profile: dict, plan, data: dict) -> dict:
         "Open taken": plan.summary.get("task_open", 0),
         "Vrijwensen gerespecteerd": free_days_met,
         "Vrijwensen gemist": free_days_missed,
+        "Dagelijkse dienstwensen ingewilligd": daily_met,
+        "Dagelijkse dienstwensen gemist": daily_missed,
         "Weekendspreiding (FTE)": round(weekend_range, 2),
         "Urenafwijking (test, u)": round(hours_deviation, 1) if n_targets else None,
         "Rekentijd (s)": plan.summary.get("seconds"),

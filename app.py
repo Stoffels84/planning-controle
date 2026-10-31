@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import asdict
 from datetime import date
+from itertools import groupby
 
 import pandas as pd
 import streamlit as st
@@ -21,8 +22,9 @@ from history_v07 import aggregate_history, apply_published_history
 from tasks_v07 import validate_tasks, MODES, need_mode
 from optimization_v09 import (WEIGHT_KEYS, DEFAULTS, options_for, with_profile,
                               compare_row, signature, validate_profiles, roster_signature)
+from daily_v091 import days_in_month, shifts_by_day, current_daily_choices, update_daily_choices
 
-st.set_page_config(page_title="Controleursplanning | v0.9", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.9.1", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -195,53 +197,142 @@ def to_iso(value) -> str:
 
 
 
-def render_preferences(eid: str, scope: str) -> None:
-    """Eén formulier voor beheerder of controleur; opslagrechten in store.py."""
+def render_daily_preferences(eid: str, scope: str) -> None:
+    """Per kalenderdag kiezen uit de dienstnummers die die dag ingepland staan.
+
+    Bewaart alle dagkeuzes met één databasebewerking (optimistic locking).
+    Geen kalenderdiensten buiten de actuele maandbehoefte aanbieden.
+    """
     data = st.session_state.project_data
-    own = [p for p in data["preferences"] if p["employee_id"] == eid]
-    if own:
-        st.dataframe(pd.DataFrame([{"Type": PREFERENCE_TYPES[preference_type(p)],
-                                   "Details": preference_description(p), "Prioriteit": p["priority"]}
-                                  for p in own]), hide_index=True, use_container_width=True)
-    else:
-        st.info("Nog geen persoonlijke wensen geregistreerd voor deze maand.")
-    kind = st.selectbox("Soort voorkeur", list(PREFERENCE_TYPES),
-                        format_func=lambda x: PREFERENCE_TYPES[x], key="pref_kind_" + scope)
-    with st.form("pref_form_" + scope + "_" + kind):
-        pref = {"employee_id": eid, "type": kind}
-        if kind in ("free_day", "work_day"):
-            d = st.date_input("Datum", date(data["year"], data["month"], 1))
-            pref["date"] = d.isoformat()
-        elif kind == "category":
-            pref["category"] = st.selectbox("Categorie", CATEGORIES)
-            pref["direction"] = st.radio("Wens", ["prefer", "avoid"], horizontal=True,
-                                          format_func=lambda x: "Liefst" if x == "prefer" else "Vermijden")
-        elif kind == "shift":
-            pref["shift_id"] = st.selectbox("Dienstnummer", [s["id"] for s in data["shifts"]])
-            pref["direction"] = st.radio("Wens", ["prefer", "avoid"], horizontal=True,
-                                          format_func=lambda x: "Liefst" if x == "prefer" else "Vermijden")
-        elif kind == "weekly_free":
-            pref["weekday"] = st.selectbox("Weekdag", range(7), format_func=lambda x: WEEKDAYS[x])
-        elif kind == "avoid_transition":
-            pairs = [catalog.transition_code(a, b) for a in CATEGORIES for b in CATEGORIES]
-            pref["transition"] = st.selectbox("Liever niet na elkaar", pairs)
-        pref["priority"] = st.select_slider("Prioriteit", options=[1, 2, 3], value=2,
-                                              format_func=lambda x: {1: "Laag", 2: "Normaal", 3: "Hoog"}[x])
-        if st.form_submit_button("Voorkeur opslaan"):
-            state = clone()
-            state["preferences"] = [p for p in state["preferences"]
-                                    if preference_identity(p) != preference_identity(pref)]
-            state["preferences"].append(pref)
-            replace_and_rerun(state)
-    if own:
-        chosen = st.selectbox("Voorkeur intrekken", range(len(own)),
-                              format_func=lambda i: PREFERENCE_TYPES[preference_type(own[i])] + " — " + preference_description(own[i]),
-                              key="remove_pref_" + scope)
-        if st.button("Verwijder geselecteerde voorkeur", key="remove_button_" + scope):
-            state = clone()
-            key = preference_identity(own[chosen])
-            state["preferences"] = [p for p in state["preferences"] if preference_identity(p) != key]
-            replace_and_rerun(state)
+    available = shifts_by_day(data)
+    old = current_daily_choices(data, eid)
+    dates = days_in_month(data)
+    st.markdown("### Mijn dienstwensen per dag")
+    st.caption("Kies per dag een **dienstnummer** uit de maandbehoefte. "
+               "Geen voorkeur of liever vrij kan ook. Dit zijn wensen, geen gegarandeerde toewijzingen.")
+    stale = [p for day, p in old.items()
+             if preference_type(p) == "daily_shift" and
+             p.get("shift_id") not in {sh["id"] for sh in available.get(day, [])}]
+    if stale:
+        st.warning("Eén of meer eerder gekozen diensten staan niet langer op de maandbehoefte. "
+                   "Kies opnieuw en sla het overzicht op om deze oude wensen te vervangen.")
+
+    pending = {}
+    with st.form(f"daily_preference_form_{scope}_{eid}_{data['year']}_{data['month']}"):
+        grouped = [(key, list(items)) for key, items in groupby(
+            dates, key=lambda d: (d.isocalendar().year, d.isocalendar().week))]
+        for week_number, ((_, week), items) in enumerate(grouped):
+            with st.expander(f"Week {week} · {items[0]:%d/%m} – {items[-1]:%d/%m}",
+                             expanded=week_number == 0):
+                for day in items:
+                    iso = day.isoformat()
+                    shifts = available.get(iso, [])
+                    # Tuples voorkomen een botsing met echte dienstnummers.
+                    options = [("none", ""), ("free", "")] + [("shift", sh["id"]) for sh in shifts]
+                    entry = old.get(iso, {})
+                    kind = preference_type(entry) if entry else ""
+                    wanted = (("shift", entry["shift_id"]) if kind == "daily_shift"
+                              else ("free", "") if kind == "free_day" else ("none", ""))
+                    if wanted not in options:
+                        wanted = ("none", "")
+                    by_id = {sh["id"]: sh for sh in shifts}
+                    def display(value, lookup=by_id):
+                        typ, sid = value
+                        if typ == "none":
+                            return "Geen voorkeur"
+                        if typ == "free":
+                            return "Liefst vrij"
+                        shift = lookup[sid]
+                        return f"{sid} · {shift['start']}–{shift['end']}"
+
+                    c_day, c_shift, c_priority = st.columns([1.35, 3, 1.25])
+                    with c_day:
+                        st.markdown(f"**{WEEKDAYS[day.weekday()]}**  ")
+                        st.caption(f"{day:%d/%m/%Y}")
+                    with c_shift:
+                        selected = st.selectbox(
+                            f"Dienstwens voor {iso}", options,
+                            index=options.index(wanted), format_func=display,
+                            label_visibility="collapsed", key=f"daily_choice_{scope}_{eid}_{iso}")
+                        if not shifts:
+                            st.caption("Geen diensten in maandbehoefte")
+                    with c_priority:
+                        priority = st.selectbox(
+                            f"Prioriteit {iso}", [1, 2, 3],
+                            index=int(entry.get("priority", 2)) - 1,
+                            format_func=lambda v: {1: "Laag", 2: "Normaal", 3: "Hoog"}[v],
+                            label_visibility="collapsed", key=f"daily_priority_{scope}_{eid}_{iso}")
+                    pending[iso] = {"kind": selected[0], "shift_id": selected[1],
+                                    "priority": priority}
+        submitted = st.form_submit_button("💾 Alle dienstwensen voor deze maand opslaan")
+    if submitted:
+        try:
+            updated = update_daily_choices(data, eid, pending)
+        except ValueError as error:
+            st.error(str(error))
+        else:
+            st.session_state[f"daily_saved_{scope}_{eid}"] = True
+            replace_and_rerun(updated)
+    if st.session_state.pop(f"daily_saved_{scope}_{eid}", False):
+        st.success("Je dienstwensen per datum zijn opgeslagen.")
+
+
+def render_preferences(eid: str, scope: str) -> None:
+    """Dagelijkse diensten bovenaan; bestaande overige voorkeuren blijven beschikbaar."""
+    render_daily_preferences(eid, scope)
+    data = st.session_state.project_data
+    # Oude categorie-/algemene dienstwensen blijven bestaan, maar controleurs
+    # gebruiken voor nieuwe dienstwensen nu het dagrooster hierboven.
+    own = [p for p in data["preferences"] if p["employee_id"] == eid
+           and preference_type(p) not in ("free_day", "daily_shift")]
+    with st.expander("Overige voorkeuren (optioneel)"):
+        if own:
+            st.dataframe(pd.DataFrame([{"Type": PREFERENCE_TYPES[preference_type(p)],
+                                       "Details": preference_description(p), "Prioriteit": p["priority"]}
+                                      for p in own]), hide_index=True, use_container_width=True)
+        else:
+            st.info("Geen aanvullende voorkeuren geregistreerd voor deze maand.")
+        if scope == "own":
+            kinds = ["work_day", "weekly_free", "avoid_transition"]
+        else:
+            kinds = ["work_day", "category", "shift", "weekly_free", "avoid_transition"]
+        kind = st.selectbox("Soort aanvullende voorkeur", kinds,
+                            format_func=lambda x: PREFERENCE_TYPES[x], key="pref_kind_" + scope)
+        with st.form("pref_form_" + scope + "_" + kind):
+            pref = {"employee_id": eid, "type": kind}
+            if kind == "work_day":
+                d = st.date_input("Datum", date(data["year"], data["month"], 1))
+                pref["date"] = d.isoformat()
+            elif kind == "category":
+                pref["category"] = st.selectbox("Categorie", CATEGORIES)
+                pref["direction"] = st.radio("Wens", ["prefer", "avoid"], horizontal=True,
+                                              format_func=lambda x: "Liefst" if x == "prefer" else "Vermijden")
+            elif kind == "shift":
+                pref["shift_id"] = st.selectbox("Dienstnummer", [s["id"] for s in data["shifts"]])
+                pref["direction"] = st.radio("Wens", ["prefer", "avoid"], horizontal=True,
+                                              format_func=lambda x: "Liefst" if x == "prefer" else "Vermijden")
+            elif kind == "weekly_free":
+                pref["weekday"] = st.selectbox("Weekdag", range(7), format_func=lambda x: WEEKDAYS[x])
+            elif kind == "avoid_transition":
+                pairs = [catalog.transition_code(a, b) for a in CATEGORIES for b in CATEGORIES]
+                pref["transition"] = st.selectbox("Liever niet na elkaar", pairs)
+            pref["priority"] = st.select_slider("Prioriteit", options=[1, 2, 3], value=2,
+                                                  format_func=lambda x: {1: "Laag", 2: "Normaal", 3: "Hoog"}[x])
+            if st.form_submit_button("Aanvullende voorkeur opslaan"):
+                state = clone()
+                state["preferences"] = [p for p in state["preferences"]
+                                        if preference_identity(p) != preference_identity(pref)]
+                state["preferences"].append(pref)
+                replace_and_rerun(state)
+        if own:
+            chosen = st.selectbox("Aanvullende voorkeur intrekken", range(len(own)),
+                                  format_func=lambda i: PREFERENCE_TYPES[preference_type(own[i])] + " — " + preference_description(own[i]),
+                                  key="remove_pref_" + scope)
+            if st.button("Verwijder geselecteerde aanvullende voorkeur", key="remove_button_" + scope):
+                state = clone()
+                key = preference_identity(own[chosen])
+                state["preferences"] = [p for p in state["preferences"] if preference_identity(p) != key]
+                replace_and_rerun(state)
 
 
 if PERSISTENT:
@@ -256,6 +347,11 @@ if PERSISTENT:
     if previous_revision is not None and previous_revision != revision:
         # Een gelijktijdige wijziging mag geen oude, net ingediende formuliervelden overschrijven.
         st.session_state.remote_change_notice = True
+        # Formulierwaarden van vóór de externe wijziging mogen de nieuwe
+        # databasegegevens niet stilzwijgend overschrijven.
+        for widget_key in list(st.session_state.keys()):
+            if widget_key.startswith(("daily_choice_", "daily_priority_")):
+                del st.session_state[widget_key]
         st.rerun()
 elif "project_data" not in st.session_state:
     st.session_state.project_data = build_demo()
@@ -264,7 +360,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.9 • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.9.1 • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -729,7 +825,7 @@ elif screen == "Maandbehoefte":
 
 elif screen == "Voorkeuren":
     st.subheader("Beheer van persoonlijke voorkeuren")
-    st.caption("Alle zes voorkeurtypes zijn **zachte** wensen. Ze mogen nooit verplichte bezetting, rust of inzetbaarheidsregels overrulen.")
+    st.caption("Dagelijks een concreet dienstnummer kiezen uit de maandbehoefte. Ook deze wensen zijn **zacht**: bezetting, rust en inzetbaarheid gaan altijd voor.")
     if data["employees"]:
         chosen_pref = st.selectbox("Controleur", [e["id"] for e in data["employees"]],
                                    format_func=lambda i: next(e["name"] for e in data["employees"] if e["id"] == i))
