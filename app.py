@@ -25,8 +25,9 @@ from optimization_v09 import (WEIGHT_KEYS, DEFAULTS, options_for, with_profile,
                               compare_row, signature, validate_profiles, roster_signature)
 from daily_v091 import days_in_month, shifts_by_day, current_daily_choices, update_daily_choices
 from requests_v010 import STATUS_LABELS
+from swap_v011 import regular_assignments
 
-st.set_page_config(page_title="Controleursplanning | v0.10", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.11", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -362,7 +363,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.10 • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.11 • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -402,7 +403,7 @@ with st.sidebar:
 screens = (["Overzicht", "Controleurs", "Diensten", "Taken", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Weekend en maandgrenzen", "Planning", "Optimalisatie vergelijken"]
            if is_manager else ["Mijn planning", "Mijn voorkeuren"])
 if PERSISTENT:
-    screens += (["Verlofaanvragen beheren"] if is_manager else ["Mijn verlofaanvragen"])
+    screens += (["Verlofaanvragen beheren", "Ruilaanvragen beheren"] if is_manager else ["Mijn verlofaanvragen", "Mijn ruilaanvragen"])
 if PERSISTENT and current_user["role"] == "admin":
     screens += ["Accounts", "Historiek"]
 screen = st.radio("Onderdeel", screens, horizontal=True, label_visibility="collapsed")
@@ -432,7 +433,7 @@ if screen == "Overzicht":
 
 **In v0.7:** taaktoewijzing binnen bestaande diensten met kwalificatiecontrole en keuze om gepubliceerde weekendhistoriek mee te nemen.
 
-**In v0.8:** tijdelijke vrijstellingen en zelfstandige taken. **In v0.9:** opgeslagen optimalisatieprofielen en meerdere planningsalternatieven. **In v0.9.1:** concrete dienstwensen per datum. **In v0.10:** verlof aanvragen, beoordelen en goedgekeurde dagen automatisch blokkeren voor toekomstige berekeningen. **Nog niet gebouwd:** dienst-ruilaanvragen, volledige aanvragen- en goedkeuringsstromen, wettelijke validatie, zelfstandige teamplanning, regels over maandgrenzen en automatische back-ups.""")
+**In v0.8:** tijdelijke vrijstellingen en zelfstandige taken. **In v0.9:** opgeslagen optimalisatieprofielen en meerdere planningsalternatieven. **In v0.9.1:** concrete dienstwensen per datum. **In v0.10:** verlof aanvragen, beoordelen en goedgekeurde dagen automatisch blokkeren voor toekomstige berekeningen. **Nog niet gebouwd:** uitgebreide ruilen met taken, volledige aanvragen- en goedkeuringsstromen, wettelijke validatie, zelfstandige teamplanning, regels over maandgrenzen en automatische back-ups.""")
 
 elif screen == "Controleurs":
     st.subheader("Controleursbeheer")
@@ -1414,6 +1415,116 @@ elif screen == "Verlofaanvragen beheren":
     published = store.load_plan(engine, data["year"], data["month"], published_only=True)
     if published and published["revision"] != st.session_state.workspace_revision:
         st.warning("Er is een gepubliceerde planning uit een oudere invoerversie. Bereken en publiceer een nieuwe planning voordat je die als actueel beschouwt.")
+
+elif screen == "Mijn ruilaanvragen":
+    st.subheader("Mijn dienst-ruilaanvragen")
+    eid = current_user["employee_id"]
+    rows = store.list_swap_requests(engine, eid)
+    labels = {"pending": "Wacht op collega", "accepted": "Wacht op planner",
+              "declined": "Afgewezen door collega", "withdrawn": "Ingetrokken",
+              "rejected": "Afgewezen door planner", "approved": "Goedgekeurd en gepubliceerd"}
+    if rows:
+        st.dataframe(pd.DataFrame([{
+            "Aanvraag": r["id"], "Eigenaar": r["initiator_id"], "Collega": r["colleague_id"],
+            "Oorspronkelijk": f'{r["own_day"]} · {r["own_shift"]}',
+            "Ruilpartner": f'{r["their_day"]} · {r["their_shift"]}',
+            "Status": labels.get(r["status"], r["status"])
+        } for r in rows]), hide_index=True, use_container_width=True)
+        incoming = [r for r in rows if r["status"] == "pending" and r["colleague_id"] == eid]
+        outgoing = [r for r in rows if r["status"] == "pending" and r["initiator_id"] == eid]
+        if incoming:
+            st.markdown("#### Ruilvoorstel van collega")
+            chosen = st.selectbox("Aanvraag beantwoorden", incoming, format_func=lambda r:
+                f'#{r["id"]}: {r["own_day"]} {r["own_shift"]} ↔ {r["their_day"]} {r["their_shift"]}')
+            left,right = st.columns(2)
+            if left.button("Akkoord met voorgestelde ruil", type="primary"):
+                try:
+                    store.respond_swap(engine, chosen["id"], eid, True)
+                    st.rerun()
+                except (ValueError, store.ConflictError) as exc:
+                    st.error(str(exc))
+            if right.button("Voorstel afwijzen"):
+                try:
+                    store.respond_swap(engine, chosen["id"], eid, False)
+                    st.rerun()
+                except (ValueError, store.ConflictError) as exc:
+                    st.error(str(exc))
+        if outgoing:
+            chosen = st.selectbox("Eigen openstaand voorstel intrekken", outgoing,
+                format_func=lambda r: f'#{r["id"]}: {r["own_day"]} {r["own_shift"]}')
+            if st.button("Voorstel intrekken"):
+                try:
+                    store.respond_swap(engine, chosen["id"], eid, False)
+                    st.rerun()
+                except (ValueError, store.ConflictError) as exc:
+                    st.error(str(exc))
+    else:
+        st.info("Je hebt nog geen ruilaanvragen.")
+    published = store.load_plan(engine, data["year"], data["month"], published_only=True)
+    if not published or published["revision"] != st.session_state.workspace_revision:
+        st.warning("Voor nieuwe aanvragen is een actuele gepubliceerde maandplanning nodig.")
+    else:
+        own = [r for r in regular_assignments(published["payload"]) if r["Personeelsnr"] == eid]
+        if not own:
+            st.info("Er zijn geen eigen reguliere diensten beschikbaar voor een ruil.")
+        else:
+            st.markdown("#### Nieuwe ruil aanvragen")
+            st.caption("Je geeft het personeelsnummer en een concrete dienst van je collega op. Alleen de collega kan het voorstel accepteren; daarna beslist de planner.")
+            with st.container():
+                own_row = st.selectbox("Mijn dienst om te ruilen", own,
+                    format_func=lambda r: f'{r["Datum"]} · {r["Dienstnummer"]} ({r["Begin"]}–{r["Einde"]})')
+                colleague = st.text_input("Personeelsnummer van de collega", max_chars=64)
+                first = date(data["year"], data["month"], 1)
+                last = date(data["year"], data["month"], calendar.monthrange(data["year"],data["month"])[1])
+                their_day = st.date_input("Datum van zijn/haar dienst", value=first, min_value=first, max_value=last)
+                possible = sorted({str(r["shift_id"]) for r in data["demand"] if r["date"] == their_day.isoformat()})
+                their_shift = st.selectbox("Dienstnummer van de collega", possible or ["—"], disabled=not possible)
+                submit = st.button("Ruilvoorstel versturen", disabled=not possible)
+            if submit:
+                try:
+                    store.request_swap(engine, eid, colleague.strip(), date.fromisoformat(own_row["Datum"]),
+                                       str(own_row["Dienstnummer"]), their_day, their_shift)
+                    st.success("Ruilaanvraag ingediend. De collega moet eerst akkoord gaan.")
+                    st.rerun()
+                except (ValueError, store.ConflictError) as exc:
+                    st.error(str(exc))
+
+elif screen == "Ruilaanvragen beheren":
+    st.subheader("Ruilaanvragen beoordelen")
+    st.caption("Alleen aanvragen met wederzijds akkoord kunnen worden goedgekeurd. Voor publicatie controleert OR-Tools het VOLLEDIGE aangepaste rooster met vaste toewijzingen.")
+    requests = store.list_swap_requests(engine, current_user["employee_id"])
+    if requests:
+        st.dataframe(pd.DataFrame([{
+            "Nummer": r["id"], "Controleur": r["initiator_id"], "Collega": r["colleague_id"],
+            "Dienst A": f'{r["own_day"]} · {r["own_shift"]}',
+            "Dienst B": f'{r["their_day"]} · {r["their_shift"]}',
+            "Status": r["status"], "Nieuwe versie": r["new_plan_id"] or "—"
+        } for r in requests]), hide_index=True, use_container_width=True)
+        accepted = [r for r in requests if r["status"] == "accepted"]
+        if accepted:
+            chosen = st.selectbox("Ruil beoordelen", accepted, format_func=lambda r:
+                f'#{r["id"]}: {r["initiator_id"]} ↔ {r["colleague_id"]}')
+            left,right = st.columns(2)
+            if left.button("Goedkeuren en publiceren", type="primary"):
+                try:
+                    with st.spinner("OR-Tools controleert het volledige rooster (max. 15 seconden)…"):
+                        result = store.decide_swap(engine, chosen["id"], current_user["employee_id"], True)
+                    st.success(f'Ruil goedgekeurd. Nieuwe gepubliceerde planversie #{result["new_plan_id"]}.')
+                    st.rerun()
+                except (ValueError, store.ConflictError) as exc:
+                    st.error(str(exc))
+                except Exception:
+                    st.error("De volledige solververificatie kon niet worden voltooid; de planning is niet aangepast.")
+            if right.button("Ruil weigeren"):
+                try:
+                    store.decide_swap(engine, chosen["id"], current_user["employee_id"], False)
+                    st.rerun()
+                except (ValueError, store.ConflictError) as exc:
+                    st.error(str(exc))
+        else:
+            st.info("Er zijn geen ruilaanvragen die op goedkeuring wachten.")
+    else:
+        st.info("Er zijn nog geen ruilaanvragen.")
 
 elif screen == "Mijn voorkeuren":
     st.subheader("Mijn persoonlijke voorkeuren")

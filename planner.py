@@ -99,7 +99,7 @@ def validate_dataset(data: dict) -> list[str]:
     return errors
 
 
-def solve_month(data: dict) -> PlanResult:
+def solve_month(data: dict, fixed_plan: dict | None = None) -> PlanResult:
     errors = validate_dataset(data)
     if errors:
         raise ValueError("\n".join(errors))
@@ -456,6 +456,41 @@ def solve_month(data: dict) -> PlanResult:
         model.add_abs_equality(dev, staff_count * normalized[ei] - total_normalized)
         fairness.append(dev)
 
+    # v0.11: controleer ruilen door het HELE gepubliceerde rooster vast te pinnen.
+    # Dit gebruikt exact dezelfde harde constraints als de maandplanning.
+    if fixed_plan is not None:
+        fixed_people = [(str(r["Datum"]), str(r["Dienstnummer"]), str(r["Personeelsnr"]))
+                        for r in fixed_plan.get("assignments", [])]
+        if len(set(fixed_people)) != len(fixed_people):
+            raise ValueError("Dubbele toewijzingen in te controleren rooster.")
+        current_keys = {(str(req["date"]),
+                         "TAAK:" + data["task_needs"][req["_task_index"]]["task_id"]
+                         if "_task_index" in req else str(req["shift_id"]), emp["id"]): (ei, ri)
+                        for ri, req in enumerate(slots) for ei, emp in enumerate(employees)
+                        if (ei, ri) in x}
+        if not set(fixed_people).issubset(current_keys):
+            raise ValueError("De voorgestelde ruil bevat een ontoelaatbare diensttoewijzing.")
+        pinned = set(fixed_people)
+        for key, idx in current_keys.items():
+            model.add(x[idx] == int(key in pinned))
+
+        pinned_tasks = [(str(r["Datum"]), str(r["Dienstnummer"]), str(r["Taakcode"]),
+                         str(r["Personeelsnr"])) for r in fixed_plan.get("task_assignments", [])]
+        if len(set(pinned_tasks)) != len(pinned_tasks):
+            raise ValueError("Ambigue dubbele taaktoewijzingen in te controleren rooster.")
+        possible_tasks = {}
+        for (ti, ei), v in task_selected.items():
+            need = data["task_needs"][ti]
+            key = (str(need["date"]), str(need.get("shift_id") or "Zelfstandig"),
+                   str(need["task_id"]), employees[ei]["id"])
+            if key in possible_tasks:
+                raise ValueError("Dubbele taakbehoefte kan niet veilig worden vastgezet voor ruilverificatie.")
+            possible_tasks[key] = v
+        if not set(pinned_tasks).issubset(possible_tasks):
+            raise ValueError("De gepubliceerde taaktoewijzingen zijn niet meer geldig.")
+        for key, v in possible_tasks.items():
+            model.add(v == int(key in set(pinned_tasks)))
+
     # Groot genoeg voor lexicografische voorrang van dekking boven zachte scores.
     # Bovenbound voor de zachte wensen en abs-afwijkingen bij het maximaal aantal posten.
     pref_weight = int(settings["preference_weight"])
@@ -482,7 +517,9 @@ def solve_month(data: dict) -> PlanResult:
                    + hours_weight * sum(hours_deviations))
 
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = float(settings["time_limit_seconds"])
+    solver.parameters.max_time_in_seconds = min(15.0, float(settings["time_limit_seconds"])) if fixed_plan is not None else float(settings["time_limit_seconds"])
+    if fixed_plan is not None:
+        solver.parameters.stop_after_first_solution = True
     solver.parameters.num_search_workers = 4
     status = solver.solve(model)
     status_name = solver.status_name(status)

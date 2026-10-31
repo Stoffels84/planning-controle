@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from demo_data import build_demo
 from requests_v010 import leave_days, absence_credit
+from swap_v011 import make_swap_plan, verify_swap_with_solver
 
 
 class SetupError(RuntimeError):
@@ -82,6 +83,25 @@ class LeaveRequest(Base):
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     decided_by: Mapped[str | None] = mapped_column(String(64))
     hours_per_day: Mapped[float | None] = mapped_column(nullable=True)
+
+
+class SwapRequest(Base):
+    """Een ruilvoorstel gekoppeld aan exact één gepubliceerde planversie."""
+    __tablename__ = "swap_requests"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plan_id: Mapped[int] = mapped_column(Integer, ForeignKey("planning_versions.id"), nullable=False)
+    initiator_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    colleague_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    own_day: Mapped[date] = mapped_column(Date, nullable=False)
+    own_shift: Mapped[str] = mapped_column(String(80), nullable=False)
+    their_day: Mapped[date] = mapped_column(Date, nullable=False)
+    their_shift: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by: Mapped[str | None] = mapped_column(String(64))
+    new_plan_id: Mapped[int | None] = mapped_column(Integer)
 
 
 class AuditEvent(Base):
@@ -516,3 +536,154 @@ def decide_leave_request(engine, request_id: int, actor: str, approve: bool,
         row.decided_by = actor
         _audit(s, actor, f"Verlofaanvraag #{row.id} {row.status} door {actor}")
         return {"id": row.id, "status": row.status, "workspace_revision": w.revision}
+
+
+# v0.11 — Onderlinge dienstwissels, enkel met fictieve gegevens.
+
+def _current_published(s, year: int, month: int) -> PlanningVersion | None:
+    return s.scalar(select(PlanningVersion).where(
+        PlanningVersion.year == year, PlanningVersion.month == month,
+        PlanningVersion.published_at.is_not(None)
+    ).order_by(PlanningVersion.published_at.desc(), PlanningVersion.id.desc()).limit(1))
+
+
+def _swap_dict(r: SwapRequest) -> dict:
+    return {"id": r.id, "plan_id": r.plan_id, "initiator_id": r.initiator_id,
+            "colleague_id": r.colleague_id, "own_day": r.own_day.isoformat(),
+            "own_shift": r.own_shift, "their_day": r.their_day.isoformat(),
+            "their_shift": r.their_shift, "status": r.status,
+            "created_at": r.created_at.isoformat(),
+            "responded_at": r.responded_at.isoformat() if r.responded_at else None,
+            "decided_at": r.decided_at.isoformat() if r.decided_at else None,
+            "decided_by": r.decided_by, "new_plan_id": r.new_plan_id}
+
+
+def request_swap(engine, actor: str, colleague: str, own_day: date, own_shift: str,
+                 their_day: date, their_shift: str) -> int:
+    """Geen teamrooster nodig voor de controleur: hij geeft collega-id en dienst op."""
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        other = s.get(Account, colleague)
+        if not who or who.role != "controleur" or not who.active:
+            raise ValueError("Alleen actieve controleurs kunnen een ruil voorstellen.")
+        if not other or not other.active or other.role != "controleur" or other.employee_id == actor:
+            raise ValueError("De voorgestelde ruil is niet mogelijk. Controleer de gegevens.")
+        w = s.scalar(select(Workspace).where(Workspace.id == 1).with_for_update())
+        if w is None:
+            raise SetupError("Werkruimte ontbreekt.")
+        y, m = int(w.payload["year"]), int(w.payload["month"])
+        if any((day.year, day.month) != (y, m) for day in (own_day, their_day)):
+            raise ValueError("Een ruil moet binnen de actieve planningsmaand vallen.")
+        published = _current_published(s, y, m)
+        if published is None or published.workspace_revision != w.revision:
+            raise ValueError("Er is geen actuele gepubliceerde planning beschikbaar.")
+        make_swap_plan(published.payload, actor, colleague,
+                       own_day.isoformat(), str(own_shift), their_day.isoformat(), str(their_shift))
+        existing = s.scalars(select(SwapRequest).where(
+            SwapRequest.status.in_(("pending", "accepted")),
+            SwapRequest.plan_id == published.id)).all()
+        touched = {(actor, own_day, str(own_shift)), (colleague, their_day, str(their_shift))}
+        for r in existing:
+            other_slots = {(r.initiator_id, r.own_day, r.own_shift),
+                           (r.colleague_id, r.their_day, r.their_shift)}
+            if touched & other_slots:
+                raise ValueError("Voor een van deze dienstplaatsen is al een ruilaanvraag in behandeling.")
+        row = SwapRequest(plan_id=published.id, initiator_id=actor, colleague_id=colleague,
+                          own_day=own_day, own_shift=str(own_shift),
+                          their_day=their_day, their_shift=str(their_shift),
+                          status="pending", created_at=now())
+        s.add(row)
+        s.flush()
+        _audit(s, actor, f"Ruilaanvraag #{row.id} ingediend")
+        return row.id
+
+
+def list_swap_requests(engine, actor: str) -> list[dict]:
+    with session_factory(engine)() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active:
+            raise ValueError("Geen toegangsrechten.")
+        q = select(SwapRequest).order_by(SwapRequest.created_at.desc(), SwapRequest.id.desc())
+        if who.role == "controleur":
+            from sqlalchemy import or_
+            q = q.where(or_(SwapRequest.initiator_id == actor, SwapRequest.colleague_id == actor))
+        elif who.role not in ("admin", "planner"):
+            raise ValueError("Geen toegangsrechten.")
+        return [_swap_dict(r) for r in s.scalars(q).all()]
+
+
+def respond_swap(engine, request_id: int, actor: str, accept: bool) -> None:
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        r = s.scalar(select(SwapRequest).where(SwapRequest.id == request_id).with_for_update())
+        if not who or not who.active or who.role != "controleur" or r is None:
+            raise ValueError("Aanvraag niet beschikbaar.")
+        if r.status != "pending":
+            raise ValueError("Deze aanvraag is niet meer in behandeling.")
+        if actor == r.initiator_id:
+            if accept:
+                raise ValueError("Je kunt je eigen aanvraag niet goedkeuren.")
+            r.status = "withdrawn"
+        elif actor == r.colleague_id:
+            r.status = "accepted" if accept else "declined"
+        else:
+            raise ValueError("Je hebt geen toegang tot deze aanvraag.")
+        r.responded_at = now()
+        _audit(s, actor, f"Ruilaanvraag #{r.id} status: {r.status}")
+
+
+def decide_swap(engine, request_id: int, actor: str, approve: bool, validator=None) -> dict:
+    """Eerst buiten DB-transactie solvervalidatie, daarna atomair publiceren.
+
+    Controleer na het rekenen opnieuw dezelfde gepubliceerde versie en revisie.
+    """
+    with session_factory(engine)() as s:
+        who = s.get(Account, actor)
+        r = s.get(SwapRequest, request_id)
+        if not who or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Geen beheerrechten.")
+        if r is None or r.status != "accepted":
+            raise ValueError("De collega moet eerst akkoord gaan.")
+        w = s.get(Workspace, 1)
+        if w is None:
+            raise SetupError("Werkruimte ontbreekt.")
+        published = _current_published(s, int(w.payload["year"]), int(w.payload["month"]))
+        if published is None or published.id != r.plan_id or published.workspace_revision != w.revision:
+            raise ConflictError("De gepubliceerde planning is gewijzigd. Deze ruil is verouderd.")
+        current_rev, source_plan = w.revision, published.payload
+        candidate = make_swap_plan(source_plan, r.initiator_id, r.colleague_id,
+                                   r.own_day.isoformat(), r.own_shift,
+                                   r.their_day.isoformat(), r.their_shift)
+        workspace_snapshot = w.payload
+        old_id = published.id
+    if approve:
+        (validator or verify_swap_with_solver)(workspace_snapshot, candidate, source_plan)
+    with session_factory(engine).begin() as s:
+        w = s.scalar(select(Workspace).where(Workspace.id == 1).with_for_update())
+        r = s.scalar(select(SwapRequest).where(SwapRequest.id == request_id).with_for_update())
+        who = s.get(Account, actor)
+        if not who or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Geen beheerrechten.")
+        if w is None or w.revision != current_rev or r is None or r.status != "accepted":
+            raise ConflictError("De aanvraag of invoer is tussentijds gewijzigd.")
+        published = _current_published(s, int(w.payload["year"]), int(w.payload["month"]))
+        if published is None or published.id != old_id or published.workspace_revision != w.revision:
+            raise ConflictError("De gepubliceerde planning is ondertussen gewijzigd.")
+        if approve:
+            # Verhoog de revisie om oude concepten en al berekende alternatieven te
+            # blokkeren voor herpublicatie na deze ruil. Payload zelf blijft gelijk.
+            w.revision += 1
+            new_version = PlanningVersion(workspace_revision=w.revision, year=published.year,
+                                          month=published.month, author=actor, created_at=now(),
+                                          published_at=now(), payload=candidate)
+            s.add(new_version)
+            s.flush()
+            r.new_plan_id = new_version.id
+            r.status = "approved"
+        else:
+            r.status = "rejected"
+        r.decided_at = now()
+        r.decided_by = actor
+        _audit(s, actor, f"Ruilaanvraag #{r.id} {r.status}" +
+               (f"; nieuwe planversie {r.new_plan_id}" if r.new_plan_id else ""))
+        return _swap_dict(r)

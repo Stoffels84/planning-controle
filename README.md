@@ -1,49 +1,41 @@
-# Controleursplanning v0.10 — verlof aanvragen en goedkeuren
+# Controleursplanning v0.11 — Ruilaanvragen
 
-**Dit is een proefversie met fictieve gegevens, geen goedgekeurd personeelssysteem van De Lijn.** Deze update bouwt voort op v0.9.1: concrete dienstwensen per dag, bestaande PostgreSQL-accounts, historische planningen en OR-Tools blijven werken.
+**Uitsluitend fictieve testgegevens. Geen bedrijfsgereed rooster.** Bouwt voort op werkende v0.10, met behoud van de bestaande PostgreSQL-database, login, OR-Tools-model en verlofaanvragen.
 
 ## Nieuw
 
-- Controleurs openen **Mijn verlofaanvragen**, kiezen een begin- en einddatum binnen de actieve planningsmaand en dienen een aanvraag in. Ze kunnen een **openstaande** aanvraag zelf intrekken.
-- Planners en beheerders openen **Verlofaanvragen beheren**, zien aanvragen van testcontroleurs en kunnen deze goedkeuren of afwijzen.
-- Een aangevraagde dag is **niet** automatisch een vrije dag. Bij goedkeuring schrijft de applicatie voor iedere goedgekeurde kalenderdag een `Verlof`-registratie naar de gedeelde werkruimte. Die registratie blokkeert de volledige dag voor toekomstige OR-Tools-berekeningen, ook bij overlappende nachtdiensten.
-- Goedkeurders kiezen voorlopig het aantal **testuren per dag** (0 tot 16). Dit is geen officieel verlofsaldo, geen loonberekening en geen rechtsgeldige urencredit.
-- De aanvraag en de beslissing worden in een afzonderlijke PostgreSQL-tabel (`leave_requests`) opgeslagen; acties worden geaudit. Alleen de betreffende controleur ziet de eigen aanvragen; bevoegde planners en beheerders zien alle aanvragen.
-- Een bestaande gepubliceerde planning **blijft ongewijzigd** na goedkeuring. De app toont wanneer de gepubliceerde planning uit een oudere werkruimteversie komt. De planner moet dan opnieuw berekenen, beoordelen en expliciet publiceren.
-- Nog niet gebouwd: onderling ruilen, aanvraag van andere activiteitstypes, verwerken van verlofsaldi, wijzigen/intrekken van al goedgekeurd verlof, notificaties naar andere apparaten en officiële arbeids-/verlofregels.
+- Controleur opent **Mijn ruilaanvragen**, selecteert een eigen reguliere dienst uit de *actuele gepubliceerde planning*, vult het personeelsnummer van de collega in, en kiest diens datum en dienstnummer. Er is geen onbeperkte inzage in de volledige collega'splanning nodig.
+- De collega ziet een inkomende aanvraag, en kan **akkoord gaan** of afwijzen. De aanvrager kan de nog niet bevestigde aanvraag intrekken.
+- Daarna ziet de planner/beheerder de geaccepteerde aanvraag bij **Ruilaanvragen beheren**. Afkeuren verandert niets.
+- Bij definitieve goedkeuring controleert **Google OR-Tools het complete bestaande maandrooster met alle oorspronkelijke personeels- en taaktoewijzingen vastgezet**, behalve de twee daadwerkelijk geruilde reguliere diensten. De solver controleert daarmee dezelfde harde regels als bij een normale berekening. Bij een mislukte controle of time-out vindt geen publicatie plaats.
+- Een goedgekeurde ruil wordt **atomair als nieuwe gepubliceerde planversie opgeslagen**, zonder oude planningen te wijzigen. Beide controleurs zien hun bijgewerkte eigen rooster. Er is een auditgebeurtenis.
+- Oude aanvragen worden bij een gewijzigde gepubliceerde planversie of databasewerkruimte **geweigerd**; maak een nieuwe aanvraag op basis van het nieuwe rooster.
+- De ruil van diensten met al toegewezen specifieke taken wordt nog geweigerd: taken horen bij een persoon en vereisen afzonderlijke herplanning. Evenmin worden zelfstandige taaktoewijzingen geruild.
 
-## Update vanuit v0.9.1
+## Update vanuit v0.10
 
-1. Bewaar eerst je werkende GitHub-commit als herstelpunt en maak een **back-up** van PostgreSQL. Zonder back-up kun je bij problemen geen gegarandeerd herstel uitvoeren.
-2. Pak `controleursplanning-github-streamlit-v010.zip` uit. Upload de bestanden naar dezelfde hoofdmap van je **bestaande private GitHub-repository**. Vervang de bestaande bestanden.
-3. **Nieuwe bestanden**: `requests_v010.py` en `tests/test_v010_leave_requests.py`. **Gewijzigd**: `store.py`, `app.py` en deze `README.md`.
-4. Laat bestaande `DATABASE_URL`, accountgegevens en Streamlit Secrets ongewijzigd. Je hoeft **geen nieuwe PostgreSQL-database** te maken. Bij het starten maakt SQLAlchemy automatisch uitsluitend de nieuwe tabel `leave_requests` aan, als die nog niet bestaat.
-5. Open je Streamlit-app, meld je aan met je bestaande fictieve testaccount en test de stappen hieronder.
+1. Maak een herstelpunt van de werkende GitHub-commit en maak een **echte PostgreSQL-back-up**.
+2. Pak `controleursplanning-github-streamlit-v011.zip` uit en upload alles naar dezelfde *private* GitHub-repository.
+3. **Nieuw bestand**: `swap_v011.py`; **gewijzigd**: `planner.py`, `store.py`, `app.py`, en de README. Voeg de nieuwe tests toe onder `tests/`.
+4. Laat de bestaande `DATABASE_URL` en Secrets ongewijzigd. Bij het eerste starten maakt SQLAlchemy automatisch de nieuwe tabel `swap_requests` aan (voor deze toevoeging is geen databasemigratie nodig).
+5. Gebruik **fictieve accounts en diensten**. Publiceer een actuele fictieve planning, log in als twee verschillende controleurs, dien een ruil in, laat de collega akkoord gaan, en log in als planner om goed te keuren.
+6. Controleer in beide individuele roosters dat de nieuwe versie zichtbaar is en in Historiek dat de goedkeuring is geregistreerd.
 
-## Testscenario
+## Grenzen en beveiliging
 
-1. Log in als fictieve controleur. Open **Mijn verlofaanvragen** en vraag één of twee dagen verlof aan. De status moet **In behandeling** zijn.
-2. Log in als planner/beheerder. Open **Verlofaanvragen beheren** en keur die aanvraag goed. Kies bijvoorbeeld **7,6 testuren per dag**.
-3. Kijk bij **Uren en activiteiten**: de goedgekeurde dagen staan als `Verlof` geregistreerd. Je kunt deze goedgekeurde dagen niet stilzwijgend wissen via de gewone werkruimte-opslag.
-4. Bereken bij **Planning** een nieuw rooster. De betrokken fictieve controleur mag op die goedgekeurde dagen geen dienst krijgen. Dit moet op jouw Streamlit-hosting getest worden: de OR-Tools-omgeving ontbreekt in de lokale ontwikkelcontainer.
-5. Open **Mijn planning** als controleur nadat verlof is goedgekeurd maar vóór een nieuwe publicatie. De app waarschuwt dat de eerdere gepubliceerde planning mogelijk verouderd is; de vorige versie wordt niet automatisch aangepast.
-6. Test ook een tweede verlofaanvraag en **wijzig niets aan het wachtwoord** of de database-URL.
+- Per aanvraag worden twee reguliere dienstplaatsen **voor dezelfde planningsmaand** omgewisseld, niet een dienst overgenomen.
+- De originele planversie blijft staan, maar de workspace-revisie wordt verhoogd zodat oudere concepten niet opnieuw gepubliceerd kunnen worden; een ruil is alleen toegestaan als actuele werkruimte en gepubliceerde planversie identiek zijn aan het moment van indienen.
+- Een reeds toegewezen specifieke taak op een van de geruilde diensten verhindert de ruil. Geen impliciete taakverschuiving.
+- De solver krijgt maximaal 15 seconden om het volledige **vastgepinde** rooster te verifiëren. Bij timeout of ontbreken van een geldige oplossing wordt er niets gepubliceerd.
+- Deze workflow ondersteunt nog geen geavanceerde bevoegdheden per team en is geen goedgekeurde HR- of arbeidstijdapp. Gebruik geen echte gegevens.
+- Testaccounts hebben personeelsnummers die overeenkomen met het fictieve personeelsprofiel in het controleursbeheer.
 
-## Onderhoud / beperkingen
+## Tests
 
-- Bewaar testwachtwoorden en de database-URL **uitsluitend in Streamlit Secrets**. Zet geen `secrets.toml` of echte personeelsgegevens in GitHub.
-- De huidige aanvraagfunctie ondersteunt alleen datums binnen de **actieve maand**. Buiten de maand en voor meerdere maanden tegelijk plannen volgt later.
-- `Verlof` blokkeert de volledige kalenderdag. Bij deeltijdse medewerkers, nachtdiensten en financiële urenverrekening zijn verdere gevalideerde regels nodig.
-- Na goedkeuring kan verlof in deze proefversie **niet** eenvoudig worden ingetrokken. Gebruik dus fictieve gegevens en test voorzichtig. Later bouwen we een controleerbare annuleringsworkflow.
-- Een wijziging in de werkruimte verhoogt de versie; andere ingelogde gebruikers moeten hun scherm laten verversen. We bewaken gelijktijdige wijzigingen via database-transacties en revisies.
-- Dit is geen formele AVG-/beveiligingsaudit. Voor echte personeelsgegevens zijn goedgekeurde infrastructuur, autorisatiebeleid, bewaartermijnen en beveiligingscontroles nodig.
-
-## Technische tests
-
-In de ontwikkelomgeving: **63 geslaagd, 7 overgeslagen**; de overgeslagen modules vereisen Google OR-Tools. De nieuwe aanvraag-/databasetests zijn uitgevoerd met SQLite. Python-syntax is gecontroleerd. De Streamlit-UI en de solver moeten op jouw online omgeving worden getest.
-
-```bash
+```
 python -m pip install -r requirements.txt
 python -m pip install pytest
 python -m pytest -q
 ```
+
+De echte solvervalidatie moet uitgevoerd worden in een omgeving waar OR-Tools geïnstalleerd is.
