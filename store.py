@@ -122,6 +122,18 @@ class SwapRequest(Base):
     new_plan_id: Mapped[int | None] = mapped_column(Integer)
 
 
+class InboxNotice(Base):
+    """Melding per account, niet gedeeld via een werkruimte of sessiestatus."""
+    __tablename__ = "inbox_notices"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    recipient_id: Mapped[str] = mapped_column(String(64), ForeignKey("accounts.employee_id"), nullable=False, index=True)
+    event_key: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    body: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -162,6 +174,85 @@ def check_password_strength(password: str):
 def _audit(s, actor: str, action: str) -> None:
     s.add(AuditEvent(actor=actor, action=action, created_at=now()))
 
+
+def _notice(s, recipient: str, event_key: str, title: str, body: str) -> None:
+    """Transactieve inboxmelding. De afzender kiest de ontvanger server-side."""
+    who = s.get(Account, recipient)
+    if not who or not who.active:
+        return
+    s.add(InboxNotice(recipient_id=recipient, event_key=event_key,
+                      title=title[:160], body=body[:500], created_at=now()))
+
+
+def _notify_managers(s, key: str, title: str, body: str) -> None:
+    managers = s.scalars(select(Account).where(
+        Account.active.is_(True), Account.role.in_(("admin", "planner")))).all()
+    for manager in managers:
+        _notice(s, manager.employee_id, f"{key}:{manager.employee_id}", title, body)
+
+
+def notifications_for(engine, actor: str, limit: int = 80) -> list[dict]:
+    if not 1 <= limit <= 100:
+        raise ValueError("Ongeldige meldingenlimiet.")
+    with session_factory(engine)() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active:
+            raise ValueError("Geen toegangsrechten.")
+        rows = s.scalars(select(InboxNotice).where(InboxNotice.recipient_id == actor)
+                         .order_by(InboxNotice.id.desc()).limit(limit)).all()
+        return [{"id": row.id, "title": row.title, "body": row.body,
+                 "created_at": row.created_at.isoformat(),
+                 "read": row.read_at is not None} for row in rows]
+
+
+def mark_notice_read(engine, notice_id: int, actor: str) -> None:
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active:
+            raise ValueError("Geen toegangsrechten.")
+        row = s.scalar(select(InboxNotice).where(InboxNotice.id == notice_id).with_for_update())
+        if not row or row.recipient_id != actor:
+            raise ValueError("Melding niet beschikbaar.")
+        if row.read_at is None:
+            row.read_at = now()
+
+
+def mark_all_notices_read(engine, actor: str) -> None:
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active:
+            raise ValueError("Geen toegangsrechten.")
+        rows = s.scalars(select(InboxNotice).where(
+            InboxNotice.recipient_id == actor, InboxNotice.read_at.is_(None))).all()
+        moment = now()
+        for row in rows:
+            row.read_at = moment
+
+
+def _publish_notifications(s, row: PlanningVersion, earlier: PlanningVersion | None) -> None:
+    """Eerste publicatie: alle actieve controleurs. Herpublicatie: enkel gewijzigde roosters.
+
+    De vergelijking gebruikt uitsluitend eigen toewijzingen. Geen vertrouwelijke
+    gegevens van collega's worden in de melding opgenomen.
+    """
+    from portal_v017 import personal_publication_changes
+    previous = earlier.payload.get("assignments", []) if earlier and isinstance(earlier.payload, dict) else []
+    current = row.payload.get("assignments", []) if isinstance(row.payload, dict) else []
+    recipients = s.scalars(select(Account).where(
+        Account.active.is_(True), Account.role == "controleur")).all()
+    for recipient in recipients:
+        eid = recipient.employee_id
+        if earlier:
+            changed = personal_publication_changes(previous, current, eid)
+            if not changed:
+                continue
+            title = f"Wijziging maandplanning {row.month:02d}/{row.year}"
+            body = (f"Je gepubliceerde planning is gewijzigd op {len(changed)} "
+                    f"dag(en). Open Mijn planning voor de details.")
+        else:
+            title = f"Maandplanning {row.month:02d}/{row.year} gepubliceerd"
+            body = "Je maandplanning is gepubliceerd. Bekijk je eigen diensten bij Mijn planning."
+        _notice(s, eid, f"publish:{row.id}:{eid}", title, body)
 
 def initialize(engine, bootstrap_id: str = "", bootstrap_password: str = "") -> None:
     Base.metadata.create_all(engine)
@@ -706,19 +797,50 @@ def personal_published_versions(engine, year: int, month: int, actor: str,
                                            if isinstance(r, dict) and r.get("Personeelsnr") == target]})
         return result
 
+def publication_preview(engine, plan_id: int, actor: str) -> dict:
+    """Beveiligd voorbeeld: status en verschillen tegenover vorige publicatie."""
+    from portal_v017 import personal_publication_changes
+    with session_factory(engine)() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Geen publicatierechten.")
+        row = s.get(PlanningVersion, plan_id)
+        if row is None:
+            raise ValueError("Planningsversie onbekend.")
+        earlier = _current_published(s, row.year, row.month)
+        current = row.payload.get("assignments", []) if isinstance(row.payload, dict) else []
+        previous = earlier.payload.get("assignments", []) if earlier and isinstance(earlier.payload, dict) else []
+        ids = {r.get("Personeelsnr") for r in (previous + current) if isinstance(r, dict)}
+        ids.discard(None)
+        affected = sum(bool(personal_publication_changes(previous, current, eid)) for eid in ids)
+        summary = row.payload.get("summary", {}) if isinstance(row.payload, dict) else {}
+        open_places = summary.get("open") if isinstance(summary, dict) else None
+        return {"id": row.id, "year": row.year, "month": row.month,
+                "already_published": row.published_at is not None,
+                "last_published_id": earlier.id if earlier else None,
+                "affected_controllers": affected,
+                "open_positions": open_places,
+                "status": row.payload.get("status") if isinstance(row.payload, dict) else None}
+
+
 def publish_plan(engine, plan_id: int, expected_revision: int, actor: str) -> None:
     with session_factory(engine).begin() as s:
         who = s.get(Account, actor)
         if who is None or who.role not in ("admin", "planner") or not who.active:
             raise ValueError("Geen rechten om een planning te publiceren.")
-        row = s.get(PlanningVersion, plan_id)
+        row = s.scalar(select(PlanningVersion).where(PlanningVersion.id == plan_id).with_for_update())
         w = _period_workspace(s, row.year, row.month) if row else None
         if row is None or w is None or w.revision != expected_revision or row.workspace_revision != expected_revision:
             raise ConflictError("Deze planning is verouderd. Bereken opnieuw met de actuele invoergegevens.")
+        if row.published_at is not None:
+            raise ValueError("Deze versie is al gepubliceerd.")
         _assert_boundary_current(s, row.year, row.month, row.payload)
         if row.payload.get("status") not in ("OPTIMAL", "FEASIBLE"):
             raise ValueError("Er is geen geldige planning om te publiceren.")
+        earlier = _current_published(s, row.year, row.month)
         row.published_at = now()
+        s.flush()
+        _publish_notifications(s, row, earlier)
         _audit(s, actor, f"Planning versie {plan_id} gepubliceerd")
 
 
@@ -785,6 +907,9 @@ def request_leave(engine, employee_id: str, start: date, end: date) -> int:
                            status="pending", created_at=now())
         s.add(row)
         s.flush()
+        _notify_managers(s, f"leave-pending:{row.id}", "Nieuwe verlofaanvraag",
+                         f"Verlofaanvraag #{row.id} wacht op behandeling. "
+                         "Open Verlofaanvragen beheren.")
         _audit(s, employee_id, f"Verlofaanvraag #{row.id} ingediend")
         return row.id
 
@@ -864,6 +989,9 @@ def decide_leave_request(engine, request_id: int, actor: str, approve: bool,
             row.status = "rejected"
         row.decided_at = now()
         row.decided_by = actor
+        _notice(s, row.employee_id, f"leave-decision:{row.id}:{row.status}",
+                "Beslissing verlofaanvraag", f"Je verlofaanvraag #{row.id} is "
+                + ("goedgekeurd" if approve else "afgewezen") + ".")
         _audit(s, actor, f"Verlofaanvraag #{row.id} {row.status} door {actor}")
         return {"id": row.id, "status": row.status, "workspace_revision": w.revision}
 
@@ -924,6 +1052,9 @@ def request_swap(engine, actor: str, colleague: str, own_day: date, own_shift: s
                           status="pending", created_at=now())
         s.add(row)
         s.flush()
+        _notice(s, colleague, f"swap-request:{row.id}:{colleague}",
+                "Nieuw ruilvoorstel", f"Je hebt ruilvoorstel #{row.id} ontvangen. "
+                "Open Mijn ruilaanvragen om te reageren.")
         _audit(s, actor, f"Ruilaanvraag #{row.id} ingediend")
         return row.id
 
@@ -959,6 +1090,14 @@ def respond_swap(engine, request_id: int, actor: str, accept: bool) -> None:
         else:
             raise ValueError("Je hebt geen toegang tot deze aanvraag.")
         r.responded_at = now()
+        _notice(s, r.initiator_id, f"swap-response:{r.id}:{r.status}",
+                "Reactie op ruilvoorstel", f"Je ruilvoorstel #{r.id}: "
+                + {"withdrawn": "ingetrokken", "accepted": "collega akkoord; wacht op beheerder",
+                   "declined": "collega heeft geweigerd"}[r.status] + ".")
+        if r.status == "accepted":
+            _notify_managers(s, f"swap-accepted:{r.id}", "Ruilaanvraag klaar voor beoordeling",
+                             f"Ruilaanvraag #{r.id}: beide controleurs akkoord. "
+                             "Open Ruilaanvragen beheren.")
         _audit(s, actor, f"Ruilaanvraag #{r.id} status: {r.status}")
 
 
@@ -1024,6 +1163,10 @@ def decide_swap(engine, request_id: int, actor: str, approve: bool, validator=No
             r.status = "rejected"
         r.decided_at = now()
         r.decided_by = actor
+        for recipient_id in {r.initiator_id, r.colleague_id}:
+            _notice(s, recipient_id, f"swap-decision:{r.id}:{r.status}:{recipient_id}",
+                    "Beslissing ruilaanvraag", f"Ruilaanvraag #{r.id} is "
+                    + ("goedgekeurd en gepubliceerd" if approve else "afgewezen") + ".")
         _audit(s, actor, f"Ruilaanvraag #{r.id} {r.status}" +
                (f"; nieuwe planversie {r.new_plan_id}" if r.new_plan_id else ""))
         return _swap_dict(r)

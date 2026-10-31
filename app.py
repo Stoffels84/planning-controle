@@ -34,7 +34,7 @@ from portal_v016 import (month_weeks, preference_summary, week_choices, save_wee
                          personal_calendar, own_published_assignments, DAYS_NL, PRIORITIES)
 from portal_v017 import month_tiles, personal_publication_changes, personal_request_feed, WEEKDAYS as CALENDAR_DAYS
 
-st.set_page_config(page_title="Controleursplanning | v0.17", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.18", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -491,9 +491,17 @@ with st.sidebar:
 screens = (["Overzicht", "Controleurs", "Diensten", "Taken", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Weekend en maandgrenzen", "Planning", "Optimalisatie vergelijken"]
            if is_manager else ["Mijn planning", "Mijn voorkeuren", "Mijn aanvragen & wijzigingen"])
 if PERSISTENT:
-    screens += (["Verlofaanvragen beheren", "Ruilaanvragen beheren", "Roosterwijzigingen"] if is_manager else ["Mijn verlofaanvragen", "Mijn ruilaanvragen"])
+    screens += (["Verlofaanvragen beheren", "Ruilaanvragen beheren", "Roosterwijzigingen", "Publicatiebeheer"] if is_manager else ["Mijn verlofaanvragen", "Mijn ruilaanvragen"])
+    screens += ["Meldingen"]
 if PERSISTENT and current_user["role"] == "admin":
     screens += ["Accounts", "Historiek"]
+if PERSISTENT:
+    try:
+        unread = sum(not n["read"] for n in store.notifications_for(engine, current_user["employee_id"]))
+        with st.sidebar:
+            st.caption(f"🔔 {unread} ongelezen melding(en). Open het tabblad Meldingen.")
+    except Exception:
+        st.warning("Meldingen konden niet worden geladen; de overige functies blijven beschikbaar.")
 screen = st.radio("Onderdeel", screens, horizontal=True, label_visibility="collapsed")
 
 if screen == "Overzicht":
@@ -1324,13 +1332,33 @@ elif screen == "Planning":
         if plan_record:
             st.caption(f"Versie #{plan_record['id']} • {'Gepubliceerd' if plan_record['published'] else 'Concept'} • Opgesteld door {plan_record['author']}")
             if not plan_record["published"] and plan_record["revision"] == st.session_state.workspace_revision:
-                if st.button("✅ Publiceer deze testplanning"):
-                    try:
-                        store.publish_plan(engine, plan_record["id"], st.session_state.workspace_revision, current_user["employee_id"])
-                        st.success("Testplanning gepubliceerd.")
-                        st.rerun()
-                    except (ValueError, store.ConflictError) as error:
-                        st.error(str(error))
+                try:
+                    preview = store.publication_preview(engine, plan_record["id"], current_user["employee_id"])
+                    with st.expander("🔎 Controle vóór publicatie", expanded=True):
+                        if preview["last_published_id"] is None:
+                            st.info("Dit wordt de eerste publicatie van deze maand. Actieve controleurs krijgen een melding.")
+                        else:
+                            st.write(f"Vorige publicatie: #{preview['last_published_id']} · "
+                                     f"Roosters van {preview['affected_controllers']} controleur(s) gewijzigd.")
+                        open_count = preview.get("open_positions")
+                        if open_count is not None and open_count > 0:
+                            st.warning(f"Let op: {open_count} dienstplaats(en) zijn niet ingevuld. "
+                                       "Een gedeeltelijke planning is niet automatisch operationeel geschikt.")
+                        st.caption("De publicatie wordt niet automatisch verzonden naar e-mail; "
+                                   "alleen meldingen in de webapp.")
+                        confirmed = st.checkbox("Ik heb de maandplanning gecontroleerd en wil deze versie publiceren.",
+                                                key=f"publish_confirm_v018_{plan_record['id']}")
+                        if st.button("✅ Publiceer deze testplanning", disabled=not confirmed,
+                                     key=f"publish_v018_{plan_record['id']}"):
+                            try:
+                                store.publish_plan(engine, plan_record["id"], st.session_state.workspace_revision,
+                                                   current_user["employee_id"])
+                                st.success("Testplanning gepubliceerd. Betrokken controleurs ontvangen een melding.")
+                                st.rerun()
+                            except (ValueError, store.ConflictError) as error:
+                                st.error(str(error))
+                except ValueError as error:
+                    st.error(f"Publicatievoorbeeld niet beschikbaar: {error}")
         a,b,c = st.columns(3)
         a.metric("Benodigde plaatsen", plan.summary["required"])
         b.metric("Toegewezen plaatsen", plan.summary["assigned"])
@@ -1905,6 +1933,54 @@ elif screen == "Roosterwijzigingen":
     else:
         st.info("Voeg eerst fictieve controleurs toe.")
 
+
+elif screen == "Meldingen" and PERSISTENT:
+    st.subheader("🔔 Mijn meldingen")
+    eid = current_user["employee_id"]
+    items = store.notifications_for(engine, eid, limit=100)
+    unread_count = sum(not item["read"] for item in items)
+    st.caption(f"{unread_count} ongelezen · meldingen worden uitsluitend binnen de webapp getoond.")
+    if unread_count and st.button("Alles als gelezen markeren"):
+        store.mark_all_notices_read(engine, eid)
+        st.rerun()
+    if not items:
+        st.info("Je hebt momenteel geen meldingen.")
+    for notice in items:
+        with st.container(border=True):
+            st.markdown(("**🔵 " if not notice["read"] else "**") + notice["title"] + "**")
+            st.caption(notice["created_at"] + " UTC")
+            st.write(notice["body"])
+            if not notice["read"] and st.button("Markeer als gelezen", key=f"read_notice_{notice['id']}"):
+                store.mark_notice_read(engine, notice["id"], eid)
+                st.rerun()
+
+elif screen == "Publicatiebeheer" and PERSISTENT and is_manager:
+    st.subheader("Publicatiebeheer")
+    st.caption("Overzicht van de geselecteerde kalendermaand. Een concept wordt pas zichtbaar "
+               "voor controleurs nadat je het bij Planning expliciet publiceert.")
+    current = store.load_plan(engine, data["year"], data["month"])
+    published = store.load_plan(engine, data["year"], data["month"], published_only=True)
+    a, b = st.columns(2)
+    a.metric("Laatste opgeslagen versie", f"#{current['id']}" if current else "Geen")
+    b.metric("Laatste publicatie", f"#{published['id']}" if published else "Niet gepubliceerd")
+    if current and not current["published"]:
+        try:
+            preview = store.publication_preview(engine, current["id"], current_user["employee_id"])
+            st.write(f"Concept #{current['id']} · status: {preview['status']}")
+            st.write(f"Aantal controleurs met gewijzigde diensten: {preview['affected_controllers']}")
+            if preview["open_positions"] is not None:
+                st.write(f"Openstaande dienstplaatsen: {preview['open_positions']}")
+            if current["revision"] != st.session_state.workspace_revision:
+                st.warning("Het concept is verouderd. Bereken de planning opnieuw.")
+            st.info("Ga naar Planning → Controle vóór publicatie om dit concept gecontroleerd te publiceren.")
+        except ValueError as exc:
+            st.error(str(exc))
+    elif published:
+        st.success("Deze maand heeft een gepubliceerde planning.")
+    else:
+        st.info("Nog geen berekende planning beschikbaar voor deze maand.")
+    st.caption("Publicatie op een toekomstige datum is nog niet geautomatiseerd. "
+               "Gratis Streamlit-hosting garandeert geen continu actief achtergrondproces.")
 
 elif screen == "Accounts":
     st.subheader("Accounts beheren — alleen hoofdbeheerder")
