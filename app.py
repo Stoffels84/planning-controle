@@ -35,7 +35,7 @@ from portal_v016 import (month_weeks, preference_summary, week_choices, save_wee
 from portal_v017 import month_tiles, personal_publication_changes, personal_request_feed, WEEKDAYS as CALENDAR_DAYS
 from report_v019 import build_report, safe_excel_rows
 
-st.set_page_config(page_title="Controleursplanning | v0.19.1", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.19.2", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -451,7 +451,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.19.1 • Teamrapportage en indicatieve roosterverdeling • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.19.2 • Teamrapportage en indicatieve roosterverdeling • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -1462,7 +1462,13 @@ elif screen == "Rapportage en eerlijkheid":
                 st.caption(f"Gepubliceerde versie #{selected_plan['id']}. "
                            "De indicatieve spreiding houdt niet automatisch rekening met alle individuele beperkingen.")
                 for warning in report["warnings"]:
-                    st.warning(warning) if "gewijzigd" in warning or "niet meegerekend" in warning else st.caption(warning)
+                    # Streamlit's magic rendering displays a returned DeltaGenerator
+                    # from a bare conditional expression as an enormous help object.
+                    # Use ordinary statements: Streamlit only renders the message.
+                    if "gewijzigd" in warning or "niet meegerekend" in warning:
+                        st.warning(warning)
+                    else:
+                        st.caption(warning)
 
                 t_people, t_categories, t_history = st.tabs([
                     "Controleurs", "Dienstcategorieën", "Meerdere maanden"])

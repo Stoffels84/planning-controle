@@ -1,3 +1,29 @@
+# Controleursplanning v0.19.2 — herstel weergavefout rapportage
+
+> **Uitsluitend fictieve testgegevens.** Deze update corrigeert één specifieke Streamlit-weergavefout in de rapportage. Geen wijzigingen aan database, login, verlofprocedures, solver of gepubliceerde planningen.
+
+## Waarom verscheen een grote tabel met `DeltaGenerator`?
+
+In versie 0.19.1 stond bij de rapportagewaarschuwingen een conditionele expressie met een aanroep van `st.warning()` of `st.caption()`. Streamlit kan het geretourneerde `DeltaGenerator`-object door *magic rendering* als uitgebreide API-documentatie op het scherm tonen. Het is dus geen probleem met de PostgreSQL-database.
+
+**Oplossing:** de enkele expressie is vervangen door normale `if`/`else`-instructies. De waarschuwing of toelichting wordt nog steeds getoond, maar het achterliggende object niet.
+
+## Installatie boven op versie 0.19.1
+
+1. Bewaar je huidige GitHub-commit als herstelpunt; maak uit voorzorg een back-up van je testdatabase.
+2. Pak `controleursplanning-github-streamlit-v0192.zip` uit en upload alle bestanden in de hoofdmap van dezelfde private GitHub-repository. Voor deze fout volstaat technisch het vervangen van **`app.py`**.
+3. Commit de wijziging en open de Streamlit-app opnieuw. **Je database, accounts, Streamlit Secrets en configuratie hoeven niet te worden gewijzigd.**
+4. Kies een maand met een gepubliceerde fictieve planning, open **Rapportage en eerlijkheid** en controleer of de enorme `DeltaGenerator`-tabel verdwenen is. Controleer ook de cijfers en de Excel-export.
+
+Als je daarna alsnog een **rode foutmelding** ziet, bekijk de Streamlit-logboeken voor `REPORT_V0191_FETCH` of `REPORT_V0191_BUILD`. Deze visuele fix lost geen eventuele afzonderlijke database-/rapportageberekeningsfouten op.
+
+## Controle
+
+- Extra tests: `tests/test_v0192_streamlit_magic_regression.py` bevestigt dat rapportagewaarschuwingen via normale `if`/`else`-statements lopen en dat er geen losse conditionele Streamlit-meldingsaanroepen meer voorkomen.
+- Streamlit UI is hier niet online getest; de bestaande solvermodules vragen OR-Tools.
+
+---
+
 # Controleursplanning v0.19.1 — correctie rapportage
 
 > **Uitsluitend fictieve testgegevens.** De exacte oorzaak van de fout op Streamlit Community Cloud kan zonder de serverlogboeken niet definitief worden bevestigd. Deze versie is een gerichte, defensieve correctie op v0.19; de planningsmotor verandert niet.
