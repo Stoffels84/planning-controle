@@ -4,18 +4,19 @@ Geen echte personeelsgegevens gebruiken op gratis Community Cloud zonder goedkeu
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import hmac
 from typing import Any
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, create_engine, select
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, JSON, String, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.exc import IntegrityError
 
 from demo_data import build_demo
+from requests_v010 import leave_days, absence_credit
 
 
 class SetupError(RuntimeError):
@@ -67,6 +68,20 @@ class UsedRecoveryKey(Base):
     key_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
     used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     admin_id: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class LeaveRequest(Base):
+    """Persistente aanvraag, los van de JSON-werkruimte (geen sessie-conflict)."""
+    __tablename__ = "leave_requests"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    employee_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by: Mapped[str | None] = mapped_column(String(64))
+    hours_per_day: Mapped[float | None] = mapped_column(nullable=True)
 
 
 class AuditEvent(Base):
@@ -188,6 +203,18 @@ def save_workspace(engine, payload: dict, expected_revision: int, actor: str, ac
                 raise ValueError("Controleurs mogen uitsluitend hun eigen voorkeuren aanpassen.")
         elif who.role not in ("admin", "planner"):
             raise ValueError("Geen toegangsrechten.")
+        # Een reeds goedgekeurde afwezigheid mag niet stilzwijgend uit de
+        # werkruimte verdwijnen of van uren veranderen. Corrigeren volgt
+        # later via een afzonderlijke, geauditeerde beheerworkflow.
+        for leave in s.scalars(select(LeaveRequest).where(LeaveRequest.status == "approved")).all():
+            if (leave.start_date.year, leave.start_date.month) != (int(payload["year"]), int(payload["month"])):
+                continue
+            approved = [absence_credit(leave.employee_id, day, leave.hours_per_day)
+                        for day in leave_days(leave.start_date, leave.end_date,
+                                              int(payload["year"]), int(payload["month"]))]
+            for entry in approved:
+                if entry not in payload.get("hour_credits", []):
+                    raise ValueError("Een goedgekeurde verlofdag mag niet zomaar gewijzigd of gewist worden.")
         row.payload = payload
         row.revision += 1
         _audit(s, actor, action)
@@ -376,3 +403,116 @@ def published_plans_before(engine, year: int, month: int, months_back: int = 3) 
                 found.setdefault(period, row)
         return [{'year': p.year, 'month': p.month, 'id': p.id, 'payload': p.payload}
                 for _, p in sorted(found.items())]
+
+
+def _leave_dict(row: LeaveRequest) -> dict:
+    return {"id": row.id, "employee_id": row.employee_id,
+            "start_date": row.start_date.isoformat(), "end_date": row.end_date.isoformat(),
+            "status": row.status, "created_at": row.created_at.isoformat(),
+            "decided_at": row.decided_at.isoformat() if row.decided_at else None,
+            "decided_by": row.decided_by, "hours_per_day": row.hours_per_day}
+
+
+def request_leave(engine, employee_id: str, start: date, end: date) -> int:
+    """Controleur vraagt alleen eigen verlof aan voor de actieve testmaand."""
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, employee_id)
+        if who is None or who.role != "controleur" or not who.active:
+            raise ValueError("Alleen een actieve controleur kan eigen verlof aanvragen.")
+        w = s.scalar(select(Workspace).where(Workspace.id == 1).with_for_update())
+        if w is None or not any(e["id"] == employee_id and e.get("active", True)
+                                for e in w.payload["employees"]):
+            raise ValueError("Dit account is niet aan een actieve controleur gekoppeld.")
+        dates = leave_days(start, end, int(w.payload["year"]), int(w.payload["month"]))
+        for other in s.scalars(select(LeaveRequest).where(
+                LeaveRequest.employee_id == employee_id,
+                LeaveRequest.status.in_(("pending", "approved")))).all():
+            if start <= other.end_date and other.start_date <= end:
+                raise ValueError("Er bestaat al een openstaande of goedgekeurde aanvraag voor deze dagen.")
+        existing = {(c["employee_id"], c["date"]) for c in w.payload.get("hour_credits", [])}
+        if any((employee_id, day.isoformat()) in existing for day in dates):
+            raise ValueError("Op één of meer aangevraagde dagen staat al een geregistreerde afwezigheid.")
+        row = LeaveRequest(employee_id=employee_id, start_date=start, end_date=end,
+                           status="pending", created_at=now())
+        s.add(row)
+        s.flush()
+        _audit(s, employee_id, f"Verlofaanvraag #{row.id} ingediend")
+        return row.id
+
+
+def list_leave_requests(engine, actor: str) -> list[dict]:
+    """Toegangstechnisch afgedwongen: controleurs zien alleen eigen aanvragen."""
+    with session_factory(engine)() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active:
+            raise ValueError("Geen toegangsrechten.")
+        query = select(LeaveRequest).order_by(LeaveRequest.created_at.desc(), LeaveRequest.id.desc())
+        if who.role == "controleur":
+            query = query.where(LeaveRequest.employee_id == actor)
+        elif who.role not in ("admin", "planner"):
+            raise ValueError("Geen toegangsrechten.")
+        return [_leave_dict(r) for r in s.scalars(query).all()]
+
+
+def withdraw_leave_request(engine, request_id: int, actor: str) -> None:
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        row = s.scalar(select(LeaveRequest).where(LeaveRequest.id == request_id).with_for_update())
+        if not who or not who.active or who.role != "controleur" or not row or row.employee_id != actor:
+            raise ValueError("Je kunt alleen je eigen aanvraag intrekken.")
+        if row.status != "pending":
+            raise ValueError("Alleen een openstaande aanvraag kan ingetrokken worden.")
+        row.status = "withdrawn"
+        row.decided_at = now()
+        row.decided_by = actor
+        _audit(s, actor, f"Verlofaanvraag #{row.id} ingetrokken")
+
+
+def decide_leave_request(engine, request_id: int, actor: str, approve: bool,
+                         hours_per_day: float = 0.0) -> dict:
+    """Atomair goedkeuren + registreren: nooit deels een goedgekeurde aanvraag.
+
+    Alleen goedgekeurde aanvragen blokkeren de solver; de gepubliceerde planning
+    wordt NOOIT op de achtergrond gewijzigd en moet opnieuw berekend worden.
+    """
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Alleen beheerders of planners mogen beslissen.")
+        w = s.scalar(select(Workspace).where(Workspace.id == 1).with_for_update())
+        row = s.scalar(select(LeaveRequest).where(LeaveRequest.id == request_id).with_for_update())
+        if not row or row.status != "pending":
+            raise ValueError("Deze aanvraag is niet meer in behandeling.")
+        if w is None:
+            raise ValueError("Werkruimte ontbreekt.")
+        days = leave_days(row.start_date, row.end_date,
+                          int(w.payload["year"]), int(w.payload["month"]))
+        if approve:
+            if not isinstance(hours_per_day, (int, float)) or not 0 <= hours_per_day <= 16:
+                raise ValueError("Testuren moeten tussen 0 en 16 liggen.")
+            if not any(e["id"] == row.employee_id and e.get("active", True)
+                       for e in w.payload["employees"]):
+                raise ValueError("Controleur bestaat niet meer of is niet actief.")
+            payload = dict(w.payload)
+            credits = list(payload.get("hour_credits", []))
+            existing = {(c["employee_id"], c["date"]) for c in credits}
+            additions = [absence_credit(row.employee_id, day, float(hours_per_day)) for day in days]
+            if any((entry["employee_id"], entry["date"]) in existing for entry in additions):
+                raise ValueError("Op één of meer dagen staat al een activiteit. Controleer eerst het urenoverzicht.")
+            credits.extend(additions)
+            payload["hour_credits"] = credits
+            # De regelvalidatie bevat geen OR-Tools-import: bruikbaar in databasetests.
+            from extras import validate_extras
+            problems = validate_extras(payload)
+            if problems:
+                raise ValueError("Afwezigheid kan niet worden verwerkt: " + " ".join(problems))
+            w.payload = payload
+            w.revision += 1
+            row.hours_per_day = float(hours_per_day)
+            row.status = "approved"
+        else:
+            row.status = "rejected"
+        row.decided_at = now()
+        row.decided_by = actor
+        _audit(s, actor, f"Verlofaanvraag #{row.id} {row.status} door {actor}")
+        return {"id": row.id, "status": row.status, "workspace_revision": w.revision}

@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import asdict
 from datetime import date
+import calendar
 from itertools import groupby
 
 import pandas as pd
@@ -23,8 +24,9 @@ from tasks_v07 import validate_tasks, MODES, need_mode
 from optimization_v09 import (WEIGHT_KEYS, DEFAULTS, options_for, with_profile,
                               compare_row, signature, validate_profiles, roster_signature)
 from daily_v091 import days_in_month, shifts_by_day, current_daily_choices, update_daily_choices
+from requests_v010 import STATUS_LABELS
 
-st.set_page_config(page_title="Controleursplanning | v0.9.1", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.10", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -360,7 +362,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.9.1 • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.10 • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -399,6 +401,8 @@ with st.sidebar:
 
 screens = (["Overzicht", "Controleurs", "Diensten", "Taken", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Weekend en maandgrenzen", "Planning", "Optimalisatie vergelijken"]
            if is_manager else ["Mijn planning", "Mijn voorkeuren"])
+if PERSISTENT:
+    screens += (["Verlofaanvragen beheren"] if is_manager else ["Mijn verlofaanvragen"])
 if PERSISTENT and current_user["role"] == "admin":
     screens += ["Accounts", "Historiek"]
 screen = st.radio("Onderdeel", screens, horizontal=True, label_visibility="collapsed")
@@ -428,7 +432,7 @@ if screen == "Overzicht":
 
 **In v0.7:** taaktoewijzing binnen bestaande diensten met kwalificatiecontrole en keuze om gepubliceerde weekendhistoriek mee te nemen.
 
-**In v0.8:** tijdelijke vrijstellingen en zelfstandige taken. **In v0.9:** opgeslagen optimalisatieprofielen en meerdere planningsalternatieven met een objectief vergelijkingsdashboard. **Nog niet gebouwd:** ruilaanvragen, goedkeuringsstromen, wettelijke validatie, zelfstandige teamplanning, verplichte overgangsregels over maandgrenzen en automatische back-ups.""")
+**In v0.8:** tijdelijke vrijstellingen en zelfstandige taken. **In v0.9:** opgeslagen optimalisatieprofielen en meerdere planningsalternatieven. **In v0.9.1:** concrete dienstwensen per datum. **In v0.10:** verlof aanvragen, beoordelen en goedgekeurde dagen automatisch blokkeren voor toekomstige berekeningen. **Nog niet gebouwd:** dienst-ruilaanvragen, volledige aanvragen- en goedkeuringsstromen, wettelijke validatie, zelfstandige teamplanning, regels over maandgrenzen en automatische back-ups.""")
 
 elif screen == "Controleurs":
     st.subheader("Controleursbeheer")
@@ -1321,6 +1325,96 @@ elif screen == "Optimalisatie vergelijken":
             st.info("Geen resultaten berekend.")
 
 
+elif screen == "Mijn verlofaanvragen":
+    st.subheader("Mijn verlofaanvragen")
+    st.caption("Vraag verlof aan voor de actieve testmaand. Dit is geen goedgekeurde vrije dag totdat een beheerder of planner akkoord gaat. Verlofsaldi worden niet gecontroleerd.")
+    eid = current_user["employee_id"]
+    requests = store.list_leave_requests(engine, eid)
+    if requests:
+        st.dataframe(pd.DataFrame([{
+            "Nummer": r["id"], "Van": r["start_date"], "Tot": r["end_date"],
+            "Status": STATUS_LABELS[r["status"]],
+            "Testuren/dag": r["hours_per_day"], "Beslist door": r["decided_by"] or "—"
+        } for r in requests]), hide_index=True, use_container_width=True)
+    else:
+        st.info("Je hebt nog geen verlofaanvragen ingediend.")
+    if any(e["id"] == eid and e.get("active", True) for e in data["employees"]):
+        first = date(data["year"], data["month"], 1)
+        last = date(data["year"], data["month"], calendar.monthrange(data["year"], data["month"])[1])
+        with st.form("leave_request_v010", clear_on_submit=False):
+            st.markdown("#### Nieuwe verlofaanvraag")
+            a, b = st.columns(2)
+            with a:
+                start = st.date_input("Van", value=first, min_value=first, max_value=last)
+            with b:
+                end = st.date_input("Tot en met", value=first, min_value=first, max_value=last)
+            if st.form_submit_button("Verlof aanvragen"):
+                try:
+                    request_id = store.request_leave(engine, eid, start, end)
+                    st.session_state.leave_notice_v010 = f"Aanvraag #{request_id} ingediend. Je krijgt pas vrij na goedkeuring."
+                    st.rerun()
+                except (ValueError, store.ConflictError) as exc:
+                    st.error(str(exc))
+    if requests:
+        pending = [r for r in requests if r["status"] == "pending"]
+        if pending:
+            chosen = st.selectbox("Openstaande aanvraag intrekken", [r["id"] for r in pending],
+                                  format_func=lambda i: next(f"#{r['id']} • {r['start_date']} t/m {r['end_date']}"
+                                                             for r in pending if r["id"] == i))
+            if st.button("Aanvraag intrekken"):
+                try:
+                    store.withdraw_leave_request(engine, chosen, eid)
+                    st.session_state.leave_notice_v010 = "Aanvraag ingetrokken."
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+    if st.session_state.pop("leave_notice_v010", None):
+        st.success("Je aanvraag is verwerkt. Controleer de status hierboven.")
+
+elif screen == "Verlofaanvragen beheren":
+    st.subheader("Verlofaanvragen beheren")
+    st.caption("Goedkeuring registreert een VOLLEDIGE afwezigheidsdag en blokkeert de controleur bij de volgende berekening. Reeds gepubliceerde maandplanningen worden NIET stilzwijgend aangepast.")
+    rows = store.list_leave_requests(engine, current_user["employee_id"])
+    if rows:
+        employee_names = {e["id"]: e["name"] for e in data["employees"]}
+        st.dataframe(pd.DataFrame([{
+            "Nummer": r["id"], "Controleur": employee_names.get(r["employee_id"], r["employee_id"]),
+            "Van": r["start_date"], "Tot": r["end_date"], "Status": STATUS_LABELS[r["status"]],
+            "Testuren/dag": r["hours_per_day"], "Beslist door": r["decided_by"] or "—"
+        } for r in rows]), hide_index=True, use_container_width=True)
+        pending = [r for r in rows if r["status"] == "pending"]
+        if pending:
+            target_id = st.selectbox("Aanvraag behandelen", [r["id"] for r in pending],
+                format_func=lambda i: next(f"#{r['id']} • {r['employee_id']} • {r['start_date']} t/m {r['end_date']}"
+                                           for r in pending if r["id"] == i))
+            hours = st.number_input("Testuren per goedgekeurde verlofdag (geen officiële urenverrekening)",
+                                    min_value=0.0, max_value=16.0, value=0.0, step=0.1)
+            a, b = st.columns(2)
+            if a.button("✅ Goedkeuren", type="primary"):
+                try:
+                    store.decide_leave_request(engine, target_id, current_user["employee_id"], True, hours)
+                    st.session_state.leave_manager_notice_v010 = "Verlof goedgekeurd. Bereken en publiceer de planning opnieuw indien nodig."
+                    st.rerun()
+                except (ValueError, store.ConflictError) as exc:
+                    st.error(str(exc))
+            if b.button("Afwijzen"):
+                try:
+                    store.decide_leave_request(engine, target_id, current_user["employee_id"], False)
+                    st.session_state.leave_manager_notice_v010 = "Aanvraag afgewezen."
+                    st.rerun()
+                except (ValueError, store.ConflictError) as exc:
+                    st.error(str(exc))
+        else:
+            st.success("Geen openstaande aanvragen.")
+    else:
+        st.info("Er zijn nog geen aanvragen ingediend.")
+    info = st.session_state.pop("leave_manager_notice_v010", None)
+    if info:
+        st.success(info)
+    published = store.load_plan(engine, data["year"], data["month"], published_only=True)
+    if published and published["revision"] != st.session_state.workspace_revision:
+        st.warning("Er is een gepubliceerde planning uit een oudere invoerversie. Bereken en publiceer een nieuwe planning voordat je die als actueel beschouwt.")
+
 elif screen == "Mijn voorkeuren":
     st.subheader("Mijn persoonlijke voorkeuren")
     eid = current_user["employee_id"]
@@ -1338,6 +1432,8 @@ elif screen == "Mijn planning":
         eid = current_user["employee_id"]
         own = [a for a in published["payload"]["assignments"] if a["Personeelsnr"] == eid]
         st.caption(f"Gepubliceerde testversie #{published['id']} • {data['month']:02d}/{data['year']}")
+        if published["revision"] != st.session_state.workspace_revision:
+            st.warning("Let op: de gepubliceerde planning kan verouderd zijn na gewijzigde planningsgegevens of goedgekeurd verlof. Vraag de planner naar de actuele stand.")
         st.dataframe(pd.DataFrame(own, columns=["Datum", "Dienstnummer", "Categorie", "Begin", "Einde", "Beginlocatie", "Eindlocatie", "Uren"]),
                      hide_index=True, use_container_width=True)
         if not own:
