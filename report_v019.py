@@ -7,13 +7,14 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date
+import math
 
 from demo_data import CATEGORIES
 from policy_v06 import saturday_for
 
 
 def _valid_assignments(plan: dict, known_ids: set[str]) -> tuple[list[dict], int]:
-    payload = plan.get("payload", {})
+    payload = plan.get("payload", {}) if isinstance(plan, dict) else {}
     raw = payload.get("assignments", []) if isinstance(payload, dict) else []
     if not isinstance(raw, list):
         return [], 0
@@ -42,8 +43,8 @@ def _date_wishes(preferences: list[dict], employee_id: str, assigned: list[dict]
     for r in assigned:
         by_date[r['Datum']].add(str(r['Dienstnummer']))
     total, met = 0, 0
-    for p in preferences:
-        if not isinstance(p, dict) or p.get('employee_id') != employee_id:
+    for p in preferences if isinstance(preferences, list) else []:
+        if not isinstance(p, dict) or str(p.get('employee_id')) != employee_id:
             continue
         typ = p.get('type', 'free_day')
         if typ == 'free_day' and isinstance(p.get('date'), str):
@@ -63,7 +64,9 @@ def build_report(data: dict, selected: dict, published_window: list[dict]) -> di
     """
     if selected.get('year') != data.get('year') or selected.get('month') != data.get('month'):
         raise ValueError('Het gepubliceerde rooster behoort niet tot de actieve maand.')
-    employees = [e for e in data.get('employees', []) if isinstance(e, dict) and e.get('id')]
+    raw_employees = data.get('employees', [])
+    employees = [e for e in (raw_employees if isinstance(raw_employees, list) else [])
+                 if isinstance(e, dict) and e.get('id')]
     identities = {str(e['id']): e for e in employees}
     if len(identities) != len(employees):
         raise ValueError('Dubbele personeelsnummers in de brongegevens.')
@@ -80,11 +83,23 @@ def build_report(data: dict, selected: dict, published_window: list[dict]) -> di
     for r in assignments:
         by_person[str(r['Personeelsnr'])].append(r)
     person_rows = []
+    invalid_contracts = []
+
+    def contract_percent(emp: dict, eid: str) -> float:
+        try:
+            val = float(emp.get('contract_percent') or 0)
+            if not math.isfinite(val) or val < 0 or val > 100:
+                raise ValueError('Ongeldig arbeidsregime')
+            return val
+        except (ValueError, TypeError, OverflowError):
+            invalid_contracts.append(eid)
+            return 0.0
+
     for eid, emp in sorted(identities.items(), key=lambda item: str(item[1].get('name', item[0])).casefold()):
         duty_rows = by_person[eid]
         dates = {r['Datum'] for r in duty_rows if date.fromisoformat(r['Datum']).weekday() >= 5}
         weekends = {saturday_for(date.fromisoformat(d)).isoformat() for d in dates}
-        contract = float(emp.get('contract_percent') or 0)
+        contract = contract_percent(emp, eid)
         normalized = round(len(dates) * 100 / contract, 2) if 0 < contract <= 100 else None
         total_wishes, respected = _date_wishes(data.get('preferences', []), eid, duty_rows) if not stale else (0, 0)
         row = {
@@ -103,6 +118,9 @@ def build_report(data: dict, selected: dict, published_window: list[dict]) -> di
                                            if total_wishes and not stale else None)
         person_rows.append(row)
 
+    if invalid_contracts:
+        warnings.append(f'{len(set(invalid_contracts))} arbeidsregime(s) konden niet worden verwerkt; '
+                        'weekendnormalisatie voor deze controleurs is onbekend.')
     selected_payload = selected.get('payload') if isinstance(selected.get('payload'), dict) else {}
     original_summary = selected_payload.get('summary', {})
     original_summary = original_summary if isinstance(original_summary, dict) else {}
@@ -124,7 +142,9 @@ def build_report(data: dict, selected: dict, published_window: list[dict]) -> di
 
     history = []
     seen_months = set()
-    for plan in sorted(published_window, key=lambda p: (p['year'], p['month'])):
+    safe_history = [p for p in (published_window if isinstance(published_window, list) else [])
+                    if isinstance(p, dict) and type(p.get('year')) is int and type(p.get('month')) is int]
+    for plan in sorted(safe_history, key=lambda p: (p['year'], p['month'])):
         period = (plan['year'], plan['month'])
         if period in seen_months or period > (selected['year'], selected['month']):
             continue
@@ -138,7 +158,7 @@ def build_report(data: dict, selected: dict, published_window: list[dict]) -> di
         for eid, emp in identities.items():
             rows = groups[eid]
             days = {r['Datum'] for r in rows if date.fromisoformat(r['Datum']).weekday() >= 5}
-            contract = float(emp.get('contract_percent') or 0)
+            contract = contract_percent(emp, eid)
             history.append({'Maand': f'{period[1]:02d}/{period[0]}', 'Personeelsnr': eid,
                             'Controleur': str(emp.get('name', eid)),
                             'Diensten en taken': len(rows), 'Planuren': round(sum(r['Uren'] for r in rows), 2),

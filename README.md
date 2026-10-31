@@ -1,3 +1,35 @@
+# Controleursplanning v0.19.1 — correctie rapportage
+
+> **Uitsluitend fictieve testgegevens.** De exacte oorzaak van de fout op Streamlit Community Cloud kan zonder de serverlogboeken niet definitief worden bevestigd. Deze versie is een gerichte, defensieve correctie op v0.19; de planningsmotor verandert niet.
+
+## Wat is gewijzigd?
+
+- **Rapportage in afzonderlijke stappen:** fouten in het ophalen van gepubliceerde versies (`REPORT_V0191_FETCH`), berekenen (`REPORT_V0191_BUILD`), overzichtskaarten (`REPORT_V0191_METRICS`), individuele grafieken (`REPORT_V0191_CHART_PEOPLE` en `REPORT_V0191_CHART_CATEGORIES`) en export (`REPORT_V0191_EXCEL`) zijn apart te vinden in de Streamlit-logboeken.
+- **Deelresultaten blijven staan:** een probleem bij een grafiek of Excel-export verbergt niet langer de rest van een berekend rapport.
+- **Robuustere invoer:** een onleesbaar contractpercentage, ontbrekende voorkeuren of onvolledige historische records maken niet langer automatisch het volledige rapport onbruikbaar; waarschuwingen verduidelijken wat is weggelaten.
+- **Eenvoudigere databasequery:** de periodecontrole gebruikt eenvoudige SQL-jaarfilters en een exacte controle per kalendermaand in Python. Alleen de nieuwste gepubliceerde versie per maand telt mee; concepten blijven uitgesloten.
+- **Geen schemawijzigingen.** Database, accounts, verlofintrekkingen, berekening en publicatie blijven behouden.
+
+## Installeren
+
+1. Bewaar je huidige werkende GitHub-commit en maak een back-up van de PostgreSQL-testdatabase.
+2. Pak `controleursplanning-github-streamlit-v0191.zip` uit.
+3. Upload alle bestanden naar de root van je bestaande private GitHub-repository. Vooral `app.py`, `store.py` en `report_v019.py` zijn gewijzigd; het nieuwe testbestand is `tests/test_v0191_reporting_fix.py`.
+4. Commit en laat Streamlit Community Cloud opnieuw opstarten. **De Streamlit Secrets of databasegegevens hoef je niet te wijzigen.**
+5. Selecteer een maand met een gepubliceerde testplanning en open als beheerder **Rapportage en eerlijkheid**. Controleer dat de cijfers en Excel-export verschijnen.
+
+### Als de fout toch terugkomt
+
+Open **Manage app → Logs** in Streamlit Community Cloud. Zoek naar `REPORT_V0191_FETCH` of `REPORT_V0191_BUILD`. Stuur uitsluitend de technische foutsoort en tracebackregels mee, zonder wachtwoorden, database-URL, namen of personeelsgegevens. De foutcode vertelt nu welk onderdeel faalt.
+
+## Tests
+
+- **140 tests geslaagd.** Dit omvat controles voor ongeldige contractpercentages, onvolledige rapportagegegevens en een historisch venster over een jaargrens.
+- **9 solvermodules overgeslagen** omdat OR-Tools hier niet geïnstalleerd is.
+- Python-syntaxcontrole uitgevoerd. Het Streamlit-scherm en PostgreSQL-productiegedrag moeten nog worden bevestigd in jouw online testomgeving.
+
+---
+
 # Controleursplanning v0.19 — statistieken en indicatieve eerlijkheid
 
 > **Testomgeving.** Gebruik uitsluitend fictieve personeelsgegevens. De cijfers zijn beschrijvend en vormen geen oordeel over individuele medewerkers, geschiktheid of naleving van arbeidsvoorwaarden.

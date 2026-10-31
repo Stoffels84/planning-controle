@@ -35,7 +35,7 @@ from portal_v016 import (month_weeks, preference_summary, week_choices, save_wee
 from portal_v017 import month_tiles, personal_publication_changes, personal_request_feed, WEEKDAYS as CALENDAR_DAYS
 from report_v019 import build_report, safe_excel_rows
 
-st.set_page_config(page_title="Controleursplanning | v0.19", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.19.1", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -451,7 +451,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.19 • Teamrapportage en indicatieve roosterverdeling • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.19.1 • Teamrapportage en indicatieve roosterverdeling • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -1412,82 +1412,109 @@ elif screen == "Rapportage en eerlijkheid":
     if not PERSISTENT:
         st.info("Rapportage is beschikbaar zodra je PostgreSQL gebruikt en een testplanning publiceert.")
     else:
+        # Haal de gegevens in afzonderlijke stappen op. Een mislukte grafiek of
+        # Excel-export mag niet het volledige rapport onzichtbaar maken.
         try:
             published = store.report_published_window(
-                engine, current_user["employee_id"], data["year"], data["month"], months_back=1)
-            if not published:
-                st.info("Voor deze maand is nog geen planning gepubliceerd. Publiceer eerst een testplanning.")
-            else:
-                selected_plan = published[-1]
-                lookback = st.selectbox("Vergelijkingsperiode (inclusief geselecteerde maand)",
-                                        [1, 2, 3, 6, 12], index=2,
-                                        format_func=lambda v: f"{v} maand(en)",
-                                        key="report_window_v019")
+                engine, current_user["employee_id"], int(data["year"]), int(data["month"]), months_back=1)
+        except (ValueError, store.ConflictError) as error:
+            st.error(str(error))
+            published = None
+        except Exception:
+            logging.exception("REPORT_V0191_FETCH: gepubliceerde maand niet opgehaald")
+            st.error("De gepubliceerde maand kon niet worden opgehaald. Bekijk REPORT_V0191_FETCH in de logboeken.")
+            published = None
+
+        if published == []:
+            st.info("Voor deze maand is nog geen planning gepubliceerd. Publiceer eerst een testplanning.")
+        elif published:
+            selected_plan = published[-1]
+            lookback = st.selectbox("Vergelijkingsperiode (inclusief geselecteerde maand)",
+                                    [1, 2, 3, 6, 12], index=2,
+                                    format_func=lambda v: f"{v} maand(en)",
+                                    key="report_window_v019")
+            try:
                 history_versions = store.report_published_window(
-                    engine, current_user["employee_id"], data["year"], data["month"],
-                    months_back=lookback)
-                report_data = dict(data, workspace_revision=st.session_state.workspace_revision)
+                    engine, current_user["employee_id"], int(data["year"]), int(data["month"]),
+                    months_back=int(lookback))
+                report_data = dict(data, workspace_revision=st.session_state.get("workspace_revision"))
                 report = build_report(report_data, selected_plan, history_versions)
+            except (ValueError, store.ConflictError) as error:
+                st.error(str(error))
+                report = None
+            except Exception:
+                logging.exception("REPORT_V0191_BUILD: cijfers niet berekend")
+                st.error("De rapportagecijfers konden niet worden berekend. Bekijk REPORT_V0191_BUILD in de logboeken.")
+                report = None
+
+            if report is not None:
                 summary = report["summary"]
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Bezetting", f"{summary['Bezetting (%)']}%" if summary['Bezetting (%)'] is not None else "Onbekend")
-                m2.metric("Dienstplaatsen open", summary["Dienstplaatsen open"] if summary["Dienstplaatsen open"] is not None else "Onbekend")
-                m3.metric("Diensten en taken toegewezen", summary["Toewijzingen incl. taken"])
-                m4.metric("Spreiding weekenddagen per 100%", summary["Spreiding weekenddagen per 100% (indicatief)"]
-                          if summary["Spreiding weekenddagen per 100% (indicatief)"] is not None else "—")
+                try:
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Bezetting", f"{summary['Bezetting (%)']}%" if summary['Bezetting (%)'] is not None else "Onbekend")
+                    m2.metric("Dienstplaatsen open", summary["Dienstplaatsen open"] if summary["Dienstplaatsen open"] is not None else "Onbekend")
+                    m3.metric("Diensten en taken toegewezen", summary["Toewijzingen incl. taken"])
+                    m4.metric("Spreiding weekenddagen per 100%", summary["Spreiding weekenddagen per 100% (indicatief)"]
+                              if summary["Spreiding weekenddagen per 100% (indicatief)"] is not None else "—")
+                except Exception:
+                    logging.exception("REPORT_V0191_METRICS: overzichtskaarten niet getoond")
+                    st.warning("De overzichtskaarten konden niet worden getoond. De gegevens staan ook in de Excel-export.")
                 st.caption(f"Gepubliceerde versie #{selected_plan['id']}. "
-                           "Spreiding = hoogste min laagste contractgenormaliseerde weekendbelasting "
-                           "bij actieve controleurs; lager is niet automatisch beter.")
+                           "De indicatieve spreiding houdt niet automatisch rekening met alle individuele beperkingen.")
                 for warning in report["warnings"]:
                     st.warning(warning) if "gewijzigd" in warning or "niet meegerekend" in warning else st.caption(warning)
+
                 t_people, t_categories, t_history = st.tabs([
                     "Controleurs", "Dienstcategorieën", "Meerdere maanden"])
                 with t_people:
                     st.dataframe(pd.DataFrame(report["persons"]), use_container_width=True, hide_index=True)
-                    st.caption("Weekenddag = een zaterdag of zondag waarop een dienst START; "
-                               "één persoon telt maximaal één keer per kalenderdag. "
-                               "Vrijwensen en gewenste dienstnummers worden uitsluitend op datum getoetst, "
-                               "niet de andere voorkeurtypen. Bij gewijzigde invoer tonen we geen wenspercentage.")
-                    person_chart = pd.DataFrame([{
-                        "Controleur": r["Controleur"],
-                        "Weekenddagen per 100%": r["Weekenddagen per 100% contract (indicatief)"]}
-                        for r in report["persons"] if r["Actief in catalogus"]
-                        and r["Weekenddagen per 100% contract (indicatief)"] is not None])
-                    if not person_chart.empty:
-                        st.bar_chart(person_chart.set_index("Controleur"), use_container_width=True)
+                    st.caption("Weekenddag = zaterdag of zondag waarop een dienst begint. "
+                               "Bij gewijzigde invoer tonen we geen verouderd wenspercentage.")
+                    try:
+                        person_chart = pd.DataFrame([{
+                            "Controleur": r["Controleur"],
+                            "Weekenddagen per 100%": r["Weekenddagen per 100% contract (indicatief)"]}
+                            for r in report["persons"] if r["Actief in catalogus"]
+                            and r["Weekenddagen per 100% contract (indicatief)"] is not None])
+                        if not person_chart.empty:
+                            st.bar_chart(person_chart.set_index("Controleur"), use_container_width=True)
+                    except Exception:
+                        logging.exception("REPORT_V0191_CHART_PEOPLE: grafiek overgeslagen")
+                        st.caption("De grafiek kon niet worden getoond; de tabel erboven blijft beschikbaar.")
                 with t_categories:
                     st.dataframe(pd.DataFrame(report["categories"]), hide_index=True, use_container_width=True)
-                    category_frame = pd.DataFrame(report["categories"])
-                    if not category_frame.empty:
-                        st.bar_chart(category_frame.set_index("Categorie")[["Toewijzingen"]],
-                                     use_container_width=True)
-                    st.caption("Zelfstandige taken zijn, indien aanwezig, eveneens opgenomen in "
-                               "de categorie van hun toewijzing; de reguliere bezettingsgraad komt "
-                               "afzonderlijk uit de gepubliceerde planningssamenvatting.")
+                    try:
+                        category_frame = pd.DataFrame(report["categories"])
+                        if not category_frame.empty:
+                            st.bar_chart(category_frame.set_index("Categorie")[["Toewijzingen"]],
+                                         use_container_width=True)
+                    except Exception:
+                        logging.exception("REPORT_V0191_CHART_CATEGORIES: grafiek overgeslagen")
+                        st.caption("De categoriegrafiek kon niet worden getoond; de tabel blijft beschikbaar.")
+                    st.caption("Reguliere bezetting komt uit de gepubliceerde planningssamenvatting.")
                 with t_history:
                     if report["history"]:
                         st.dataframe(pd.DataFrame(report["history"]), hide_index=True, use_container_width=True)
                     else:
                         st.info("Geen eerdere gepubliceerde maanden in dit venster.")
-                    st.caption("Historiek gebruikt alleen de laatst gepubliceerde versie per maand; "
-                               "de huidige contractpercentages worden ook voor oudere maanden gebruikt "
-                               "en kunnen dus afwijken van de toenmalige situatie.")
-                xlsx_buffer = io.BytesIO()
-                with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
-                    pd.DataFrame(safe_excel_rows([summary])).to_excel(writer, sheet_name="Samenvatting", index=False)
-                    pd.DataFrame(safe_excel_rows(report["persons"])).to_excel(writer, sheet_name="Per controleur", index=False)
-                    pd.DataFrame(safe_excel_rows(report["categories"])).to_excel(writer, sheet_name="Categorieen", index=False)
-                    pd.DataFrame(safe_excel_rows(report["history"])).to_excel(writer, sheet_name="Maandhistoriek", index=False)
-                    pd.DataFrame(safe_excel_rows([{"Toelichting": v} for v in report["warnings"]])).to_excel(
-                        writer, sheet_name="Toelichting", index=False)
-                st.download_button("⬇️ Download rapport als Excel", data=xlsx_buffer.getvalue(),
-                                   file_name=f"controleursplanning_rapport_{data['year']}_{data['month']:02d}.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        except (ValueError, store.ConflictError) as error:
-            st.error(str(error))
-        except Exception:
-            logging.exception("REPORT_V019: rapportage kon niet worden opgebouwd")
-            st.error("Rapportage tijdelijk niet beschikbaar. Bekijk REPORT_V019 in de Streamlit-logboeken.")
+                    st.caption("Historische maanden gebruiken de huidige namen en contractpercentages. "
+                               "Een gewijzigd contract kan daardoor de vergelijking beïnvloeden.")
+
+                try:
+                    xlsx_buffer = io.BytesIO()
+                    with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
+                        pd.DataFrame(safe_excel_rows([summary])).to_excel(writer, sheet_name="Samenvatting", index=False)
+                        pd.DataFrame(safe_excel_rows(report["persons"])).to_excel(writer, sheet_name="Per controleur", index=False)
+                        pd.DataFrame(safe_excel_rows(report["categories"])).to_excel(writer, sheet_name="Categorieen", index=False)
+                        pd.DataFrame(safe_excel_rows(report["history"])).to_excel(writer, sheet_name="Maandhistoriek", index=False)
+                        pd.DataFrame(safe_excel_rows([{"Toelichting": v} for v in report["warnings"]])).to_excel(
+                            writer, sheet_name="Toelichting", index=False)
+                    st.download_button("⬇️ Download rapport als Excel", data=xlsx_buffer.getvalue(),
+                                       file_name=f"controleursplanning_rapport_{data['year']}_{data['month']:02d}.xlsx",
+                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                except Exception:
+                    logging.exception("REPORT_V0191_EXCEL: export niet beschikbaar")
+                    st.warning("De Excel-export is tijdelijk niet beschikbaar. Het rapport hierboven blijft zichtbaar.")
 
 
 elif screen == "Optimalisatie vergelijken":

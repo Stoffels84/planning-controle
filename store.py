@@ -901,15 +901,19 @@ def report_published_window(engine, actor: str, year: int, month: int,
         who = s.get(Account, actor)
         if not who or not who.active or who.role not in ("admin", "planner"):
             raise ValueError("Geen rechten om teamrapporten te raadplegen.")
-        month_number = PlanningVersion.year * 12 + PlanningVersion.month - 1
+        # Beperk de query tot de relevante kalenderjaren. De periodecontrole
+        # in Python vermijdt verschillen in SQL-aritmetiek tussen databases.
+        first_year = (target - months_back + 1) // 12
         versions = s.scalars(select(PlanningVersion).where(
             PlanningVersion.published_at.is_not(None),
-            month_number <= target,
-            month_number > target - months_back,
+            PlanningVersion.year >= first_year,
+            PlanningVersion.year <= year,
         ).order_by(PlanningVersion.published_at.desc(), PlanningVersion.id.desc())).all()
         latest = {}
         for row in versions:
-            latest.setdefault((row.year, row.month), row)
+            period = row.year * 12 + row.month - 1
+            if target - months_back < period <= target:
+                latest.setdefault((row.year, row.month), row)
         return [dict(year=r.year, month=r.month, id=r.id, revision=r.workspace_revision,
                      payload=r.payload if isinstance(r.payload, dict) else {})
                 for _, r in sorted(latest.items())]
