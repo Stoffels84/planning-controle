@@ -14,6 +14,7 @@ def scenario():
         e['blocked_shifts'] = []
         e['max_month_hours'] = 176
     d['shifts'] = [s for s in d['shifts'] if s['id'] == 'V101']
+    d['shifts'][0]['required'] = 1  # Zelfde vaste bezetting als in de testmaandbehoefte.
     d['demand'] = [{'date': '2026-11-03', 'shift_id': 'V101', 'required': 1}]
     d['preferences'] = []
     d['settings']['time_limit_seconds'] = 5
