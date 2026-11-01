@@ -1,4 +1,18 @@
-# Controleursplanning v0.23 — handmatige roosterbewerking
+# Controleursplanning v0.23.1 — opgeschoonde handmatige roosterbewerking
+
+## Update vanuit v0.23
+
+Deze kleine onderhoudsupdate verwijdert het verouderde uitklapmenu **Diensten vastzetten en overige heroptimaliseren (v0.22) — oude methode** uit **Planning**. Er is nu nog slechts één bediening: **Handmatige roosterbewerking (v0.23)**. Daarmee blijven meerdere diensten toevoegen, vervangen, verwijderen en behouden, met één gecontroleerde heroptimalisatie, beschikbaar.
+
+Het bestand `locks_v022.py` blijft **verplicht**: de nieuwe editor en OR-Tools-planner gebruiken de onderliggende controle- en vergelijkingsfuncties. Ook de historische gegevens van eerdere heroptimalisaties blijven leesbaar. Dit pakket wijzigt **geen** database, planning, personeel of Streamlit Secrets.
+
+**Installatie:** bewaar een herstelpunt van v0.23 en maak een databaseback-up. Pak het volledige ZIP-pakket uit en vervang in je GitHub-repository bij voorkeur **alle bestanden**, of uitsluitend `app.py` als je al exact v0.23 gebruikt. Upload geen `__pycache__` of lokale Secrets. Commit en herlaad Streamlit.
+
+**Test:** open Planning met een berekende maand. Alleen **Handmatige roosterbewerking (v0.23)** mag verschijnen; het oude uitklapmenu niet. Test vervolgens een bestaande toewijzing behouden/vervangen en het maken van een nieuw concept. Controleer dat publicaties niet worden overschreven.
+
+---
+
+## Bestaande functionaliteit uit v0.23
 
 > **Proefversie met uitsluitend fictieve gegevens.** Niet geschikt voor echte personeelsgegevens of operationele planningsbeslissingen zonder aparte veiligheids-, privacy- en arbeidsrechtelijke validatie.
 
@@ -29,13 +43,13 @@ Bij succes wordt het resultaat als **nieuwe conceptplanning** opgeslagen, nooit 
 - **Verwijderen** betekent *dezelfde controleur niet opnieuw op deze dienst*. Het betekent niet *de dienstplaats bewust onbezet laten* en het verwijdert het dienstnummer niet uit de maandbehoefte.
 - De wachtrij met nog niet opgeslagen wijzigingen bestaat alleen in de huidige Streamlit-sessie. Vernieuw de browser niet voordat je klaar bent, want niet-toegepaste wijzigingen kunnen verloren gaan.
 - Behoud je alle bestaande diensten, dan kan de herberekening onhaalbaar worden. Zet de behoud-optie uit indien een grotere herschikking nodig is; controleer de verschillen daarna zorgvuldig.
-- De oude v0.22-functie **Diensten vastzetten en overige heroptimaliseren** blijft beschikbaar, maar voor meerdere bewerkingen gebruik je bij voorkeur v0.23.
+- Het oude v0.22-**bedieningspaneel** is verwijderd in v0.23.1. De interne hulpfuncties blijven in gebruik voor de nieuwe editor.
 - Er wordt geen volledige handmatige vrije roostereditor gebruikt die arbeidsregels buiten de solver om kan wijzigen. Het definitieve rooster ontstaat steeds door een gecontroleerde herberekening.
 
 ## Installeren op je bestaande GitHub- en Streamlit-app
 
-1. Maak een **back-up van de PostgreSQL-database** en bewaar de werkende GitHub-commit van **v0.22** als herstelpunt.
-2. Pak `controleursplanning-github-streamlit-v023.zip` uit.
+1. Maak een **back-up van de PostgreSQL-database** en bewaar de werkende GitHub-commit van **v0.23** als herstelpunt.
+2. Pak `controleursplanning-github-streamlit-v0231.zip` uit.
 3. Upload de **volledige inhoud** naar de root van je bestaande private GitHub-repository; overschrijf de bestanden uit de vorige versie. Voeg zeker het nieuwe bestand `manual_v023.py` toe. Ook `app.py`, `planner.py`, `store.py` en de tests zijn gewijzigd.
 4. Commit de wijziging en open de bestaande Streamlit Community Cloud-app opnieuw.
 5. **Laat je bestaande PostgreSQL-database, `DATABASE_URL` en andere Streamlit Secrets ongewijzigd.** Er zijn geen nieuwe tabellen of migraties nodig.
@@ -52,7 +66,7 @@ Test uitsluitend met fictieve controleurs en diensten.
 6. Laat **Behoud alle andere bestaande reguliere toewijzingen** ingeschakeld. Als de lijst een tegenstrijdigheid toont, corrigeer die. Je kunt voor een minder beperkte herberekening de behoud-optie uitzetten.
 7. Bevestig en klik **Controleer wijzigingen en maak nieuw concept**. Controleer dat alle vereiste toewijzingen behouden zijn, verboden oude combinaties niet terugkomen en andere diensten de harde regels respecteren.
 8. Controleer in **Publicatiebeheer** dat de bestaande gepubliceerde versie nog steeds intact is. Pas na een aparte bevestiging mag de nieuwe conceptversie gepubliceerd worden.
-9. Open het oude v0.22-onderdeel en bevestig dat de bestaande vergrendelingsfunctie nog beschikbaar is.
+9. Controleer dat **het oude v0.22-onderdeel niet meer zichtbaar is**. Controleer dat **Bestaande dienst behouden** in de v0.23-editor nog werkt.
 10. Test een onmogelijke combinatie, bijvoorbeeld twee vastgezette diensten op één dag voor dezelfde persoon; de app moet weigeren **zonder nieuwe versie te bewaren**.
 
 ## Automatische tests
@@ -62,10 +76,10 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-Bij het samenstellen van dit pakket: **204 tests geslaagd; 11 testmodules overgeslagen**, omdat OR-Tools in de pakketomgeving niet beschikbaar is. De nieuwe integratietests voor `excluded_assignments` staan in `tests/test_v023_solver.py`; ze moeten nog uitgevoerd worden in de geïnstalleerde Streamlit-omgeving met OR-Tools. De nieuwe schermen zijn nog niet interactief in Streamlit getest.
+Bij het samenstellen van **v0.23.1: 206 tests geslaagd; 11 tests overgeslagen**, omdat OR-Tools in de pakketomgeving niet beschikbaar is. De nieuwe integratietests voor `excluded_assignments` staan in `tests/test_v023_solver.py`; ze moeten nog uitgevoerd worden in de geïnstalleerde Streamlit-omgeving met OR-Tools. De nieuwe schermen zijn nog niet interactief in Streamlit getest.
 
 ## Versie en compatibiliteit
 
-- Gebaseerd op de volledige **v0.22-broncode**; geen nieuw database- of Secrets-vereiste.
-- Nieuw: `manual_v023.py`; aangepast: `app.py`, `planner.py`, `store.py`; nieuw: tests `test_v023_manual.py`, `test_v023_solver.py`, `test_v023_persistence.py`.
+- Gebaseerd op de volledige **v0.23-broncode**; geen nieuw database- of Secrets-vereiste.
+- Wijzigingen ten opzichte van v0.23: alleen `app.py`, `README.md` en regressietests. `planner.py`, `store.py`, `manual_v023.py` en `locks_v022.py` zijn ongewijzigd gebleven.
 - Bestaande functionaliteit blijft behouden: maandwerkruimtes, maandbehoefte kopiëren, voorkeuren, verlof en gedeeltelijke intrekking, ruilen, taken, meldingen, publicatiebeheer, rapportage, diagnoses en Excel-export.

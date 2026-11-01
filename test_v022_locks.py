@@ -70,16 +70,16 @@ def test_diff_detects_lost_pin():
     assert not reoptimization_diff([lock()], [], [lock()])['alle_vaste_behouden']
 
 
-def test_code_integrates_solver_and_publication_without_changing_swap_verification():
+def test_new_editor_integrates_solver_and_publication_without_changing_swap_verification():
     project = Path(__file__).resolve().parents[1]
     ui = (project / 'app.py').read_text(encoding='utf-8')
     solver = (project / 'planner.py').read_text(encoding='utf-8')
     tree = ast.parse(ui)
     ast.parse(solver)
-    assert 'locked_assignments=selected' in ui
+    assert 'locked_assignments=compiled["locked"]' in ui
     assert 'store.save_plan(engine, data, st.session_state.workspace_revision' in ui
-    assert 'Diensten vastzetten en overige heroptimaliseren' in ui
-    assert 'Heroptimaliseer met vaste toewijzingen' in ui
+    assert '✏️ Handmatige roosterbewerking (v0.23)' in ui
+    assert '🔍 Controleer wijzigingen en maak nieuw concept' in ui
     assert 'if fixed_plan is not None:' in solver
     assert 'if locked:' in solver
     assert 'model.add(possible[key] == 1)' in solver
