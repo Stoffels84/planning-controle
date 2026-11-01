@@ -1,3 +1,43 @@
+# Controleursplanning v0.29 — individuele rustspreiding per zeven dagen
+
+Deze versie bouwt voort op de door de gebruiker geteste **v0.28**. Nieuwe functie: een optionele persoonlijke *harde* grens voor het minimum aantal vrije dagen in elk voortschrijdend tijdvak van zeven kalenderdagen. De bestaande weekendrotatie, maandregimes, verlofprocedures, taken, handmatige roosterbewerking en publicatie blijven behouden.
+
+## Werking
+
+Open als beheerder of planner **Weekend en maandgrenzen → Individueel weekend- en maandprofiel → Individuele rustspreiding (v0.29)**. Kies een controleur en stel *Uitgeschakeld*, *1*, *2* of *3* vrije dagen per zeven dagen in. **Standaard: uitgeschakeld**. Bij 2 betekent dit: maximaal 5 werkdagen in ieder overlappend 7-dagenvenster; de twee vrije dagen hoeven niet opeenvolgend te zijn.
+
+Een dag telt als *gewerkt* wanneer een reguliere dienst of zelfstandige taak op die kalenderdatum **begint**. Een op vrijdag begonnen nachtdienst die zaterdag eindigt telt daarom voor deze proefregel als vrijdag. Dat is **niet** automatisch een volwaardige dagelijkse of wekelijkse rustperiode. De overige bestaande regels over feitelijke rusturen blijven daarnaast gelden.
+
+Bij een volledig venster binnen de planningsmaand controleert CP-SAT de regel altijd. Een venster dat de maandgrens overschrijdt telt **uitsluitend wanneer de direct aangrenzende maand een gepubliceerde planning heeft**. Dat geldt ook als het aangrenzende gepubliceerde rooster geen diensten bevat. Ontbrekende publicaties worden nooit stilzwijgend als vrije dagen beschouwd. De onafhankelijke roostercontrole v0.25 controleert dezelfde vensters na berekening.
+
+## Installatie — volledige versie
+
+1. Bewaar de werkende GitHub-versie **v0.28** en maak een **PostgreSQL-back-up**.
+2. Pak `controleursplanning-github-streamlit-v029.zip` uit en upload alle bestanden **met hun mapstructuur** naar de bestaande GitHub-repository. Vervang zeker `app.py`, `planner.py`, `catalog.py`, `store.py` en `validator_v025.py`. Voeg het **nieuwe bestand `rest_v029.py`** toe in de hoofdmap.
+3. Plaats `tests/test_v029_rest_distribution.py` en `tests/test_v029_solver.py` in de map `tests/`; controleer ook de bestaande `.github/workflows/tests.yml`.
+4. Klik op **Commit changes**. De Streamlit-app wordt opnieuw geladen. **Geen nieuwe tabellen of migratie**; Streamlit Secrets en database-URL blijven ongewijzigd.
+5. Controleer de **recentste GitHub Actions-uitvoering**. De solvertests moeten daar met OR-Tools slagen; een groene uitvoering bewijst alleen dat de bestaande geautomatiseerde tests slagen, niet dat alle sectorregels volledig zijn gevalideerd.
+
+## Testscenario
+
+- Kies fictieve controleur A, zet het maximum opeenvolgende werkdagen tijdelijk op 7 en de minimumvrije dagen op **2**.
+- Zet fictieve behoeften op zeven opeenvolgende kalenderdagen. Die controleur mag daar volgens deze proefregel **hoogstens vijf** diensten krijgen; twee vrije dagen mogen gespreid liggen.
+- Test als gepubliceerde voorgaande maand diensten van **27 t/m 31 oktober**. Controleur A mag dan **1 november** niet werken als dat de regel voor zeven dagen zou doorbreken.
+- Zet de persoonlijke minimumregeling weer op **Uitgeschakeld**; de eerdere beperkingen blijven onafhankelijk actief.
+- Controleer dat opslaan lukt, ook als er in een andere sectie nog afwijkende oudere activiteiten staan. Zulke fouten worden **niet hersteld of verborgen** en moeten apart worden opgelost vóór herberekening.
+
+## Veiligheid, validatie en beperkingen
+
+De rustinstelling is een **globale persoonsregel** voor alle planningsmaanden (net als v0.28). Het wijzigen verhoogt de revisie van alle bestaande maanden, waardoor eerdere concepten opnieuw berekend moeten worden; reeds gepubliceerde planningen veranderen niet. De opslag is geïsoleerd met rolcontrole, optimistische revisiecontrole en auditlog en verandert geen diensturen, bezetting, verlofregistraties of andere gegevens.
+
+Deze regel is **niet dezelfde** als een wettelijk voorgeschreven dagelijkse of wekelijkse rustperiode en is nog niet getoetst aan De Lijn-reglementen of CAO's. Het gebruik blijft beperkt tot **fictieve testgegevens**. Bij onbekende aangrenzende maand kan geen volledige garantie over de maandgrens gegeven worden.
+
+**Lokale testreeks:** 307 tests geslaagd, 14 overgeslagen wegens ontbrekende OR-Tools. De nieuwe solver-integratietests zijn opgenomen voor **GitHub Actions** en moeten daar nog groen worden bevestigd. De UI moet nog in de Streamlit-omgeving getest worden.
+
+---
+
+## Eerdere functies en handleiding
+
 # Controleursplanning v0.28 — weekendrotatie
 
 Deze versie bouwt voort op de werkende **v0.27.2** en voegt één nieuwe, **optionele** harde rotatieregel toe. De bestaande solver, handmatige bewerkingen, maanduren, verlof, koppelingen en publicatie blijven aanwezig.

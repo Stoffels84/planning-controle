@@ -36,6 +36,7 @@ def profile(employee: dict) -> dict:
     result.setdefault("max_weekend_days", None)
     result.setdefault("max_worked_weekends", None)
     result.setdefault("max_consecutive_worked_weekends", None)  # v0.28: None = uit
+    result.setdefault("min_days_off_per_7", None)  # v0.29: None = uit
     result.setdefault("protected_weekends", [])
     result.setdefault("historic_weekend_days", 0)
     result.setdefault("opening_hour_balance", 0.0)
@@ -65,6 +66,7 @@ def new_employee(identifier: str, name: str, team: str, contract_percent: int, m
         "max_month_categories": {}, "target_month_categories": {},
         "max_weekend_days": None, "max_worked_weekends": None,
         "max_consecutive_worked_weekends": None,
+        "min_days_off_per_7": None,
         "protected_weekends": [], "historic_weekend_days": 0,
         "opening_hour_balance": 0.0, "qualifications": [], "blocked_tasks": [], "active": True,
     }
@@ -203,6 +205,9 @@ def validate_employee(employee: dict, known_shifts: set[str]) -> list[str]:
     if e["preferred_category"] not in (*CATEGORIES, "Geen"):
         errors.append(f"Controleur {key}: ongeldige voorkeurscategorie.")
     errors.extend(f"Controleur {key}: {x}" for x in validate_periods(e["blocked_periods"]))
+    from rest_v029 import validate_min_days_off
+    if not validate_min_days_off(e.get("min_days_off_per_7")):
+        errors.append(f"Controleur {key}: minimum vrije dagen per 7 dagen moet 1–3 zijn of uit staan.")
     errors.extend(validate_v06_employee(e))
     return errors
 

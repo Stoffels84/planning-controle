@@ -1038,7 +1038,11 @@ def _verify_marked_result_v025(s, data: dict, result: dict) -> None:
                          "date": str(r["Datum"]), "start": str(r["Begin"]),
                          "end": str(r["Einde"]), "category": str(r["Categorie"]),
                          "source": side})
-    check = verify_plan(apply_month_regimes(data), result, rows)
+    from copy import deepcopy as _copy
+    audit_data = _copy(apply_month_regimes(data))
+    audit_data["_boundary_sources"] = _published_boundary_ids(
+        s, int(data["year"]), int(data["month"]))
+    check = verify_plan(audit_data, result, rows)
     if not check["passed"]:
         raise ValueError("Onafhankelijke roostercontrole v0.25 mislukt: "
                          + "; ".join(check["errors"][:5]))
@@ -1910,3 +1914,39 @@ def save_weekend_streak_v028(engine, year: int, month: int, expected_revision: i
             work.revision += 1
         _audit(s, actor, f"Weekendreeks {employee_id} ingesteld op {maximum} (v0.28)")
         return row.revision
+
+
+
+def save_min_rest_days_v029(engine, year: int, month: int, expected_revision: int,
+                             actor: str, employee_id: str, minimum_days_off: int | None) -> int:
+    """Gerichte wijziging van één individuele globale 7-daagse rustregel.
+
+    Wijzigt geen activiteiten, dienstbehoefte, maandregimes of publicaties.
+    Elk bestaand concept wordt via de verhoogde maandrevisie verouderd.
+    """
+    from rest_v029 import validate_min_days_off
+    if not validate_min_days_off(minimum_days_off):
+        raise ValueError("Minimum vrije dagen moet 1–3 zijn of uitgeschakeld.")
+    if type(expected_revision) is not int or expected_revision < 0:
+        raise ValueError("Ongeldige maandrevisie.")
+    key = period_key(year, month)
+    with session_factory(engine).begin() as session:
+        who = session.get(Account, actor)
+        if who is None or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Alleen beheerders en planners mogen rustregels wijzigen.")
+        shared = session.scalar(select(SharedCatalog).where(SharedCatalog.id == 1).with_for_update())
+        month_row = session.scalar(select(MonthWorkspace).where(MonthWorkspace.period == key).with_for_update())
+        if shared is None or month_row is None or month_row.revision != expected_revision:
+            raise ConflictError("De maandgegevens zijn intussen aangepast. Herlaad eerst.")
+        amended = deepcopy(shared.payload)
+        matches = [e for e in amended.get("employees", []) if e.get("id") == employee_id]
+        if len(matches) != 1:
+            raise ValueError("Controleur niet gevonden in de gedeelde catalogus.")
+        if matches[0].get("min_days_off_per_7") == minimum_days_off:
+            return month_row.revision
+        matches[0]["min_days_off_per_7"] = minimum_days_off
+        shared.payload = amended
+        for work in session.scalars(select(MonthWorkspace)).all():
+            work.revision += 1
+        _audit(session, actor, f"Minimale vrije dagen per 7 dagen voor {employee_id}: {minimum_days_off} (v0.29)")
+        return month_row.revision

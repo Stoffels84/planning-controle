@@ -21,6 +21,7 @@ import store
 import catalog
 from policy_v06 import weekend_start_dates, hours_overview, service_overview
 from weekend_v028 import MAX_STREAK_SETTING
+from rest_v029 import validate_min_days_off
 from history_v07 import aggregate_history, apply_published_history
 from tasks_v07 import validate_tasks, MODES, need_mode
 from optimization_v09 import (WEIGHT_KEYS, DEFAULTS, options_for, with_profile,
@@ -46,7 +47,7 @@ from activity_move_v0263 import activity_destination, validate_movable_activity
 from hours_v027 import (validate_month_regimes, apply_month_regimes,
                          build_balance_preview, apply_balance_to_solver)
 
-st.set_page_config(page_title="Controleursplanning | v0.28", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.29", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -499,7 +500,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.28 • Individuele weekendrotatie en urenbalans • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.29 • Rustspreiding, weekendrotatie en urenbalans • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -1567,6 +1568,34 @@ elif screen == "Weekend en maandgrenzen":
                 st.rerun()
             except (ValueError, store.ConflictError) as exc:
                 st.error(str(exc))
+        st.markdown("#### Individuele rustspreiding (v0.29)")
+        st.caption("Optioneel: minstens 1–3 **vrije startdagen in elke voortschrijdende periode van 7 dagen**. "
+                   "Vrije dagen zijn dagen waarop géén dienst of zelfstandige taak begint. "
+                   "Gepubliceerde aangrenzende maanden tellen mee wanneer beschikbaar; "
+                   "een onbekende maand wordt niet als vrij aangenomen. Globale personeelsregel.")
+        current_min = person.get("min_days_off_per_7")
+        options = [None, 1, 2, 3]
+        desired = st.selectbox("Minimaal aantal vrije dagen per 7 dagen", options,
+                               index=options.index(current_min) if current_min in options else 0,
+                               format_func=lambda x: "Uitgeschakeld" if x is None else str(x),
+                               key=f"v029_free_{selected}_{data['year']}_{data['month']}")
+        if st.button("Individuele rustspreiding bewaren", key="v029_save_free"):
+            try:
+                if PERSISTENT:
+                    store.save_min_rest_days_v029(engine, int(data["year"]), int(data["month"]),
+                        int(st.session_state.workspace_revision), current_user["employee_id"],
+                        selected, desired)
+                    fresh, revision = store.load_month_workspace(engine, int(data["year"]), int(data["month"]))
+                    st.session_state.project_data, st.session_state.workspace_revision = fresh, revision
+                else:
+                    updated = clone()
+                    next(e for e in updated["employees"] if e["id"] == selected)["min_days_off_per_7"] = desired
+                    st.session_state.project_data = updated
+                st.session_state.pop("last_plan", None)
+                st.session_state.pop("alternatives_v09", None)
+                st.rerun()
+            except (ValueError, store.ConflictError) as exc:
+                st.error(str(exc))
     st.caption("Weekendgrenzen en historische dagtellingen tellen diensten op hun startdatum. "
                "Beschermde weekends blokkeren ook overlappende nachtdiensten.")
 
@@ -1793,7 +1822,7 @@ elif screen == "Planning":
                 calculation_data = with_boundary_context(calculation_data, boundary_context)
                 candidate = solve_month(calculation_data)
                 if candidate.status in ("OPTIMAL", "FEASIBLE"):
-                    check = verify_plan(apply_month_regimes(data), asdict(candidate), boundary_context["assignments"])
+                    check = verify_plan(with_boundary_context(apply_month_regimes(data), boundary_context), asdict(candidate), boundary_context["assignments"])
                     if not check["passed"]:
                         raise ValueError("Onafhankelijke roostercontrole v0.25 afgekeurd: "
                                          + "; ".join(check["errors"][:5])
@@ -1831,7 +1860,7 @@ elif screen == "Planning":
         audit = None
         if plan.status in ("OPTIMAL", "FEASIBLE"):
             try:
-                audit = verify_plan(data, asdict(plan), boundary_context["assignments"])
+                audit = verify_plan(with_boundary_context(data, boundary_context), asdict(plan), boundary_context["assignments"])
                 with st.expander("🛡️ Onafhankelijke roostercontrole (v0.25)", expanded=not audit["passed"]):
                     if audit["passed"]:
                         st.success(f"Geen overtredingen aangetroffen in {audit['assignments_checked']} "
@@ -2009,7 +2038,7 @@ elif screen == "Planning":
                                     actual_keys = {assignment_key(r) for r in regular_assignments(new_plan.assignments)}
                                     if any(assignment_key(r) in actual_keys for r in compiled["excluded"]):
                                         raise ValueError("Een verwijderde dienst is toch teruggekeerd.")
-                                    check = verify_plan(data, asdict(new_plan), boundary_context["assignments"])
+                                    check = verify_plan(with_boundary_context(data, boundary_context), asdict(new_plan), boundary_context["assignments"])
                                     if not check["passed"]:
                                         raise ValueError("De onafhankelijke roostercontrole is mislukt: "
                                                          + "; ".join(check["errors"][:5]))

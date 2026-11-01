@@ -22,6 +22,7 @@ from catalog import (is_unavailable_during, profile, settings_with_defaults, tra
 from extras import preference_type, rest_blocked_during, validate_extras
 from policy_v06 import touches_protected_weekend, saturday_for
 from weekend_v028 import sliding_windows
+from rest_v029 import windows_for_month, published_sides
 from tasks_v07 import task_bounds, validate_tasks, need_mode, standalone_code, standalone_bounds
 from optimization_v09 import validate_profiles
 from boundary_v015 import validate_boundary_rows
@@ -438,6 +439,18 @@ def solve_month(data: dict, fixed_plan: dict | None = None,
         for start in range(0, max(0, len(days) - limit)):
             in_window = [v for day in days[start:start+limit+1] for v in staff_day.get((ei, day), [])]
             model.add(sum(in_window) <= limit)
+        # v0.29: minstens N vrije START-dagen in elke volledige 7-daagse
+        # periode. Grensvensters gelden alleen met een gepubliceerd buurrooster.
+        off = emp.get("min_days_off_per_7")
+        if off is not None:
+            fixed_days = {date.fromisoformat(r["date"])
+                          for r in boundary_by_employee[emp["id"]]}
+            known = published_sides(data, boundary_by_employee[emp["id"]])
+            for week in windows_for_month(int(data["year"]), int(data["month"]), known):
+                fixed_count = sum(day in fixed_days for day in week)
+                month_vars = [v for day in week for v in staff_day.get((ei, day.isoformat()), [])]
+                if month_vars:
+                    model.add(sum(month_vars) <= max(0, 7-off-fixed_count))
         max_mins = int(emp["max_month_hours"] * 60)
         model.add(sum(minutes_between(shifts[slots[ri]["shift_id"]]["start"], shifts[slots[ri]["shift_id"]]["end"]) * var for ri, var in employee_vars[ei]) <= max_mins)
 

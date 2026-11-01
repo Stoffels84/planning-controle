@@ -12,6 +12,7 @@ from catalog import is_unavailable_during, profile, settings_with_defaults, tran
 from extras import rest_blocked_during
 from policy_v06 import saturday_for, touches_protected_weekend
 from weekend_v028 import violating_weekend_streaks
+from rest_v029 import published_sides, violating_windows
 
 CATEGORIES = ("Vroeg", "Dag", "Laat", "Nacht")
 VERSION = 1
@@ -212,6 +213,17 @@ def verify_plan(data: dict, result: dict, boundaries: list[dict] | None = None) 
                 set(settings.get("blocked_transitions", [])) | set(emp.get("blocked_transitions", []))
             ):
                 errors.append(f"{eid}: verboden overgang {pcat}>{ncat} op {nday}.")
+        # v0.29: onafhankelijke controle van het minimum aantal vrije
+        # startdagen in ieder bekend volledig zeven-dagenvenster.
+        min_free = emp.get("min_days_off_per_7")
+        if min_free is not None:
+            own_days = {r[0] for r in rows if current_start <= r[0] <= current_last}
+            historical = {r[0] for r in rows if not current_start <= r[0] <= current_last}
+            sides = published_sides(data, boundaries or [])
+            violation = violating_windows(*month, own_days, historical, min_free, sides)
+            if violation:
+                start_day = violation[0][0].isoformat()
+                errors.append(f"{eid}: minder dan {min_free} vrije dagen in 7 dagen vanaf {start_day}.")
         # v0.28: onafhankelijke controle van weekendreeksen, inclusief
         # een gepubliceerd buurrooster als die maand beschikbaar is.
         streak_cap = emp.get("max_consecutive_worked_weekends")
