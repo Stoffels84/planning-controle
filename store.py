@@ -708,6 +708,69 @@ def save_month_shift(engine, year: int, month: int, expected_revision: int,
     return save_month_workspace(engine, updated, expected_revision, actor,
                                 f"Maanddienst {entry['id']} aangepast (v0.26.2)")
 
+def move_activity_to_correct_month(engine, source_year: int, source_month: int,
+                                   index: int, source_revision: int,
+                                   target_revision: int, actor: str) -> tuple[int, int]:
+    """Verplaats één bestaande afwijkende gewone activiteit volledig atomair.
+
+    De doelmaand moet al bestaan. Er is geen stilzwijgende correctie van
+    medewerkers, goedgekeurd verlof of andere opgeslagen maandgegevens.
+    Beide maanden krijgen een nieuwe revisie, zodat oude concepten niet per
+    ongeluk gepubliceerd kunnen worden. Gepubliceerde plannen blijven intact.
+    """
+    from activity_move_v0263 import validate_movable_activity
+
+    if type(index) is not int or index < 0:
+        raise ValueError("Ongeldige activiteitselectie.")
+    source_key = period_key(source_year, source_month)
+    initialize_months(engine)
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Alleen beheerders en planners mogen activiteiten verplaatsen.")
+        shared = s.scalar(select(SharedCatalog).where(SharedCatalog.id == 1).with_for_update())
+        if shared is None:
+            raise SetupError("De medewerkerscatalogus ontbreekt.")
+        src = s.scalar(select(MonthWorkspace).where(MonthWorkspace.period == source_key).with_for_update())
+        if src is None or src.revision != source_revision:
+            raise ConflictError("De bronmaand is intussen gewijzigd. Herlaad en probeer opnieuw.")
+        old_payload = deepcopy(src.payload)
+        credits = old_payload.get("hour_credits", [])
+        if not isinstance(credits, list) or index >= len(credits):
+            raise ValueError("Deze activiteit bestaat niet meer.")
+        item = credits[index]
+        employees = {e.get("id") for e in shared.payload.get("employees", []) if isinstance(e, dict)}
+        target_year, target_month = validate_movable_activity(
+            item, employees, source_year, source_month)
+        target_key = period_key(target_year, target_month)
+        dst = s.scalar(select(MonthWorkspace).where(MonthWorkspace.period == target_key).with_for_update())
+        if dst is None:
+            raise ValueError("Maak eerst de juiste doelmaand aan; er zijn geen gegevens gewijzigd.")
+        if dst.revision != target_revision:
+            raise ConflictError("De doelmaand is intussen gewijzigd. Herlaad en probeer opnieuw.")
+        target_payload = deepcopy(dst.payload)
+        target_credits = target_payload.get("hour_credits", [])
+        if not isinstance(target_credits, list) or len(target_credits) >= 3000:
+            raise ValueError("De doelmaand kan geen extra activiteit ontvangen.")
+        if any(isinstance(row, dict) and
+               (row.get("employee_id"), row.get("date")) ==
+               (item["employee_id"], item["date"]) for row in target_credits):
+            raise ValueError("De controleur heeft op die datum al een activiteit in de doelmaand.")
+        old_payload["hour_credits"] = credits[:index] + credits[index + 1:]
+        target_payload["hour_credits"] = target_credits + [deepcopy(item)]
+        # Behoud bestaande goedgekeurde verlofdagen in beide maanden.
+        _approved_leave_protected(s, old_payload)
+        _approved_leave_protected(s, target_payload)
+        src.payload = old_payload
+        dst.payload = target_payload
+        src.revision += 1
+        dst.revision += 1
+        _audit(s, actor, f"Foutieve activiteit {item['employee_id']} {item['date']} "
+               f"verplaatst van {source_year}-{source_month:02d} "
+               f"naar {target_year}-{target_month:02d} (v0.26.3)")
+        return src.revision, dst.revision
+
+
 def _period_workspace(s, year: int, month: int):
     """v0.12 gebruikt een maandrij; legacy tests zonder migratie gebruiken Workspace."""
     row = s.get(MonthWorkspace, period_key(year, month))
@@ -1424,6 +1487,97 @@ def revoke_approved_leave(engine, request_id: int, actor: str, reason: str,
                 "blijft ongewijzigd tot een nieuwe publicatie.")
         _audit(s, actor, f"Rechtstreekse intrekking {len(selected)} dag(en) uit verlof #{leave.id}: {reason[:80]}")
         return {"id": request.id, "status": request.status, "workspace_revision": revision}
+
+
+# v0.26.4 — Alleen voor expliciet bevestigde fictieve, verweesde verlofregistraties.
+def list_orphaned_approved_leave(engine, actor: str, year: int, month: int) -> list[dict]:
+    """Toon nog goedgekeurd verlof zonder controleur in de huidige catalogus.
+
+    Een verdwenen profiel is geen toestemming om verlof te wissen: de aparte
+    herstelactie vereist beheerdersrechten, een reden en expliciete bevestiging.
+    """
+    key = period_key(year, month)
+    with session_factory(engine)() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active or who.role != "admin":
+            raise ValueError("Alleen beheerders mogen verweesd testverlof herstellen.")
+        shared = s.get(SharedCatalog, 1)
+        workspace = s.get(MonthWorkspace, key)
+        if shared is None or workspace is None:
+            raise ValueError("De maand of de personeelscatalogus bestaat niet.")
+        ids = {e.get("id") for e in shared.payload.get("employees", []) if isinstance(e, dict)}
+        output = []
+        for leave in s.scalars(select(LeaveRequest).where(
+                LeaveRequest.status == "approved").order_by(LeaveRequest.id)).all():
+            if leave.employee_id in ids or (leave.start_date.year, leave.start_date.month) != (year, month):
+                continue
+            remaining = _remaining_approved_leave_days(s, leave)
+            if not remaining:
+                continue
+            pending = s.scalar(select(LeaveCancellation.id).where(
+                LeaveCancellation.leave_request_id == leave.id,
+                LeaveCancellation.status == "pending").limit(1))
+            account = s.get(Account, leave.employee_id)
+            output.append({
+                "id": leave.id, "employee_id": leave.employee_id,
+                "remaining_dates": [day.isoformat() for day in remaining],
+                "pending_cancellation": pending is not None,
+                "account_active": bool(account and account.active),
+            })
+        return output
+
+
+def archive_orphaned_approved_leave(engine, request_id: int, actor: str,
+                                    reason: str, expected_revision: int) -> int:
+    """Annuleer resterend fictief verlof zonder personeelsprofiel, met auditspoor.
+
+    Nooit via een gewone urencredit-mutatie. Verlofaanvraag én beslissingshistoriek
+    blijven in de database; reeds gepubliceerde roosters worden niet aangeraakt.
+    """
+    reason = _validate_cancel_reason(reason)
+    if len(reason) > 300:
+        raise ValueError("Gebruik maximaal 300 tekens voor de herstelreden.")
+    if type(expected_revision) is not int or expected_revision < 1:
+        raise ValueError("Ongeldige maandrevisie.")
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active or who.role != "admin":
+            raise ValueError("Alleen beheerders mogen verweesd testverlof herstellen.")
+        leave = s.scalar(select(LeaveRequest).where(LeaveRequest.id == request_id).with_for_update())
+        if not leave or leave.status != "approved":
+            raise ValueError("Dit goedgekeurde verlof bestaat niet meer.")
+        key = period_key(leave.start_date.year, leave.start_date.month)
+        row = s.scalar(select(MonthWorkspace).where(MonthWorkspace.period == key).with_for_update())
+        shared = s.scalar(select(SharedCatalog).where(SharedCatalog.id == 1).with_for_update())
+        if row is None or shared is None:
+            raise ValueError("De oorspronkelijke maand of personeelscatalogus ontbreekt.")
+        if row.revision != expected_revision:
+            raise ConflictError("De maand is intussen gewijzigd. Vernieuw de pagina.")
+        ids = {e.get("id") for e in shared.payload.get("employees", []) if isinstance(e, dict)}
+        if leave.employee_id in ids:
+            raise ValueError("Deze controleur bestaat nog in de personeelslijst. Gebruik de gewone verlofprocedure.")
+        pending = s.scalar(select(LeaveCancellation.id).where(
+            LeaveCancellation.leave_request_id == request_id,
+            LeaveCancellation.status == "pending").limit(1))
+        if pending is not None:
+            raise ValueError("Er bestaat al een intrekkingsverzoek. Behandel dat eerst.")
+        remaining = _remaining_approved_leave_days(s, leave)
+        if not remaining:
+            raise ValueError("Er zijn geen goedgekeurde verlofdagen meer.")
+        # Controleer vóór de mutatie dat alle resterende credits exact aanwezig zijn.
+        # De bestaande annuleringsfunctie verwijdert uitsluitend de credits van
+        # deze aanvraag en verhoogt de maandrevisie atomair.
+        new_revision = _apply_approved_leave_cancellation(s, leave, actor, remaining)
+        cancel = LeaveCancellation(
+            leave_request_id=leave.id, requested_by=actor,
+            reason="Administratieve correctie verweesde TESTregistratie: " + reason,
+            status="approved", created_at=now(), decided_at=now(), decided_by=actor)
+        s.add(cancel)
+        s.flush()
+        _save_cancel_selection(s, cancel.id, remaining)
+        _audit(s, actor, (f"Administratieve annulering verweesd testverlof #{request_id} "
+              f"van {leave.employee_id}, {len(remaining)} dag(en): {reason[:65]}")[:160])
+        return new_revision
 
 
 # v0.11 — Onderlinge dienstwissels, enkel met fictieve gegevens.

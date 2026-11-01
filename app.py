@@ -41,8 +41,9 @@ from roster_v024 import week_windows, month_days, roster_grid, staffing_grid, wo
 from validator_v025 import verify_plan
 from activities_v0261 import invalid_activities, remove_invalid_activities
 from shift_edit_v0262 import apply_month_shift
+from activity_move_v0263 import activity_destination, validate_movable_activity
 
-st.set_page_config(page_title="Controleursplanning | v0.26.2", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.26.4", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -1097,7 +1098,8 @@ elif screen == "Uren en activiteiten":
     invalid = invalid_activities(data)
     if invalid:
         st.error(f"Er staan {len(invalid)} afwijkende activiteiten in deze maand. "
-                 "Hierdoor kunnen wijzigingen, ook aan diensturen, niet worden opgeslagen.")
+                 "Berekening van een nieuwe planning blijft geblokkeerd tot deze activiteiten zijn hersteld. "
+                 "Diensturen kun je wel wijzigen.")
         with st.expander("Oude activiteiten controleren (v0.26.1)", expanded=True):
             st.caption("Bekijk eerst de controleur, datum en reden. Controleer of er goedgekeurd verlof "
                        "tussen staat. Verwijderen gebeurt nooit automatisch en wijzigt geen gepubliceerde planning.")
@@ -1133,9 +1135,123 @@ elif screen == "Uren en activiteiten":
                         replace_and_rerun(corrected)
                     except ValueError as error:
                         st.error(str(error))
-            st.info("Als een registratie wél geldig verlof betreft of bij een andere maand hoort, "
-                    "verwijder deze niet zonder na te gaan waar ze correct geregistreerd moet worden. "
-                    "Herstel zo nodig eerst de bijbehorende controleur of maandregistratie.")
+            # Verplaats alleen gewone activiteiten met geldige controleur en een
+            # andere, reeds bestaande doelmaand. Nooit automatische verplaatsing.
+            if PERSISTENT:
+                months_for_move = store.list_month_workspaces(engine)
+                revisions_for_move = {(m["year"], m["month"]): m["revision"] for m in months_for_move}
+                known_ids_for_move = {e["id"] for e in data["employees"]}
+                move_options = []
+                for problem in invalid:
+                    act = data["hour_credits"][problem["index"]]
+                    try:
+                        destination = validate_movable_activity(
+                            act, known_ids_for_move, data["year"], data["month"])
+                    except (ValueError, TypeError):
+                        continue
+                    if destination in revisions_for_move:
+                        move_options.append((problem["index"], destination))
+                if move_options:
+                    st.markdown("**Activiteit veilig naar de juiste maand verplaatsen (v0.26.3)**")
+                    st.caption("Alleen gewone activiteiten. Verlof, ziekte en onbekende controleurs "
+                               "kunnen niet via deze knop worden verplaatst. Beide maanden blijven bewaard.")
+                    with st.form("move_activity_v0263"):
+                        chosen_move = st.selectbox(
+                            "Kies een afwijkende activiteit",
+                            list(range(len(move_options))),
+                            format_func=lambda index: (
+                                f"Rij {move_options[index][0] + 1}: "
+                                f"{data['hour_credits'][move_options[index][0]]['employee_id']} "
+                                f"op {data['hour_credits'][move_options[index][0]]['date']} "
+                                f"→ {move_options[index][1][1]:02d}/{move_options[index][1][0]}"))
+                        move_confirmed = st.checkbox(
+                            "Ik heb de registratie gecontroleerd en de back-up gedownload. "
+                            "Ik wil deze naar de vermelde maand verplaatsen.")
+                        move_submit = st.form_submit_button("Activiteit naar juiste maand verplaatsen")
+                    if move_submit:
+                        if not move_confirmed:
+                            st.error("Bevestig de verplaatsing eerst.")
+                        else:
+                            activity_index, move_target = move_options[chosen_move]
+                            try:
+                                new_source_rev, _ = store.move_activity_to_correct_month(
+                                    engine, data["year"], data["month"], activity_index,
+                                    st.session_state.workspace_revision,
+                                    revisions_for_move[move_target], current_user["employee_id"])
+                                fresh, revision = store.load_month_workspace(engine, data["year"], data["month"])
+                                st.session_state.workspace_revision = revision
+                                st.session_state.project_data = fresh
+                                st.session_state.pop("last_plan", None)
+                                st.session_state.pop("alternatives_v09", None)
+                                st.rerun()
+                            except (store.ConflictError, ValueError) as error:
+                                st.error(str(error))
+                else:
+                    st.caption("Geen gewone activiteit die veilig naar een bestaande maand kan worden verplaatst. "
+                               "Controleer onbekende controleurs en verlofregistraties afzonderlijk.")
+            st.info("Controleer eerst of een afwijkende registratie bij een andere maand hoort. "
+                    "Gebruik de verplaatsfunctie waar mogelijk; verwijder pas na een back-up en controle. "
+                    "Goedgekeurd verlof vraagt altijd een afzonderlijke procedure.")
+    # v0.26.4: afzonderlijke administratie van goedgekeurd TESTverlof
+    # voor een controleur die niet meer in de personeelscatalogus bestaat.
+    # Dit is NOOIT de gewone verwijder- of intrekkingsroute.
+    if PERSISTENT and current_user["role"] == "admin":
+        try:
+            orphans = store.list_orphaned_approved_leave(
+                engine, current_user["employee_id"], data["year"], data["month"])
+        except (ValueError, store.ConflictError) as exc:
+            orphans = []
+            st.error(f"Controle verweesde verlofaanvragen niet beschikbaar: {exc}")
+        if orphans:
+            with st.expander("Goedgekeurd TESTverlof van verdwenen controleurs herstellen (v0.26.4)"):
+                st.warning("Alleen voor achtergebleven FICTIEVE testregistraties. "
+                           "Gebruik deze actie nooit om geldig verlof van een echte medewerker te schrappen. "
+                           "De oorspronkelijke aanvraag en het auditspoor blijven behouden.")
+                st.dataframe(pd.DataFrame([{
+                    "Aanvraag": f"#{r['id']}", "Personeelsnr": r["employee_id"],
+                    "Nog goedgekeurd": ", ".join(r["remaining_dates"]),
+                    "Intrekking in behandeling": "Ja" if r["pending_cancellation"] else "Nee",
+                    "Account nog actief": "Ja" if r["account_active"] else "Nee",
+                } for r in orphans]), hide_index=True, use_container_width=True)
+                st.caption("Bewaar eerst de JSON-back-up hierboven én een databaseback-up. "
+                           "Een gepubliceerd rooster wordt niet aangepast. ")
+                available_orphans = [r for r in orphans if not r["pending_cancellation"]]
+                if available_orphans:
+                    with st.form("archive_orphan_leave_v0264"):
+                        selected_orphan_id = st.selectbox(
+                            "Welke oorspronkelijke verlofaanvraag wil je administratief annuleren?",
+                            [r["id"] for r in available_orphans],
+                            format_func=lambda i: next(
+                                f"#{r['id']} • {r['employee_id']} • {len(r['remaining_dates'])} dag(en)"
+                                for r in available_orphans if r["id"] == i))
+                        orphan_reason = st.text_area("Reden van administratieve correctie (verplicht)",
+                                                     max_chars=300,
+                                                     placeholder="Bijvoorbeeld: fictief testprofiel verwijderd; "
+                                                                 "resterende goedkeuring administratief afsluiten")
+                        orphan_confirm = st.checkbox(
+                            "Ik heb gecontroleerd dat dit uitsluitend achtergebleven fictieve "
+                            "testgegevens zijn en geen geldig verlof; ik heb back-ups bewaard.")
+                        orphan_submit = st.form_submit_button("Fictief verweesd verlof administratief annuleren")
+                    if orphan_submit:
+                        if not orphan_confirm:
+                            st.error("Bevestig eerst de controle van de testregistratie en back-ups.")
+                        else:
+                            try:
+                                store.archive_orphaned_approved_leave(
+                                    engine, selected_orphan_id, current_user["employee_id"],
+                                    orphan_reason, st.session_state.workspace_revision)
+                                fresh, revision = store.load_month_workspace(
+                                    engine, data["year"], data["month"])
+                                st.session_state.workspace_revision = revision
+                                st.session_state.project_data = fresh
+                                st.session_state.pop("last_plan", None)
+                                st.session_state.pop("alternatives_v09", None)
+                                st.rerun()
+                            except (ValueError, store.ConflictError) as exc:
+                                st.error(str(exc))
+                else:
+                    st.info("Alle verweesde aanvragen hebben nog een intrekkingsverzoek "
+                            "in behandeling. Behandel dat via Verlofaanvragen beheren.")
     st.warning("Uren zijn planningscredits, geen officieel uren-/loon-/overurensaldo. "
                "Een registratie blokkeert de volledige betrokken kalenderdag voor reguliere diensten.")
     if data.get("hour_credits"):
