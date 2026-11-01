@@ -1,3 +1,15 @@
+# Controleursplanning v0.27.1 — correctie Urenbalans
+
+**Kleine herstelupdate boven op v0.27.** Het scherm **Urenbalans** kon vastlopen op oudere/fictieve controleursprofielen zonder het veld `target_month_hours`. Dat bleek direct reproduceerbaar met de bestaande demonstratiegegevens: bij het tonen van de streefuren ontstond een `KeyError`. De UI leest de waarden nu via `catalog.profile(...)`, dat ontbrekende velden in het geheugen aanvult met de bestaande standaardwaarde **0 streefuren**, zonder wijzigingen aan bestaande databaseprofielen.
+
+**Bestaande v0.27-installatie bijwerken:** vervang uitsluitend `app.py` in de hoofdmap van je GitHub-repository en klik op **Commit changes**. In het ZIP-bestand voor de volledige installatie is ook `tests/test_v0271_legacy_hour_ui.py` toegevoegd voor regressietests. Er zijn geen nieuwe databasevelden, databasetabellen, Secrets of instellingen nodig.
+
+**Controle:** open als beheerder **Urenbalans** bij een testmaand met `Testcontroleur 01`; beide invoervelden (*Maximum planuren* en *Streefuren*) moeten verschijnen. Sla voor een fictieve controleur een geldig maandregime op en kijk of dit na herladen behouden blijft. Controleer op GitHub **Actions** of de volledige testworkflow groen is.
+
+**Lokaal uitgevoerd:** 285 tests geslaagd, 12 OR-Tools-gerelateerde tests overgeslagen omdat die bibliotheek in de lokale omgeving ontbreekt. Deze correctie is nog niet op jouw Streamlit-app getest.
+
+---
+
 # Controleursplanning v0.27 — maandgebonden arbeidsregimes en indicatieve urenbalans
 
 **TESTVERSIE — uitsluitend fictieve gegevens.** Dit is geen officiële uren-, loon-, overuren- of CAO-verrekening. Werkelijke rust- en arbeidsregels zijn niet extern gevalideerd. De resultaten mogen niet voor operationele personeelsbeslissingen worden gebruikt.

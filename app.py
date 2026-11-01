@@ -45,7 +45,7 @@ from activity_move_v0263 import activity_destination, validate_movable_activity
 from hours_v027 import (validate_month_regimes, apply_month_regimes,
                          build_balance_preview, apply_balance_to_solver)
 
-st.set_page_config(page_title="Controleursplanning | v0.27", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.27.1", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -467,7 +467,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.27 • Maandregimes en indicatieve urenbalans • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.27.1 • Maandregimes en indicatieve urenbalans • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -1371,8 +1371,10 @@ elif screen == "Urenbalans":
             eid = st.selectbox("Controleur", [e["id"] for e in data["employees"]],
                                format_func=lambda x: next(e["name"] for e in data["employees"] if e["id"] == x),
                                key="v027_regime_employee")
-            employee = next(e for e in current_regimes["employees"] if e["id"] == eid)
-            global_profile = next(e for e in data["employees"] if e["id"] == eid)
+            # v0.27.1: legacy/demo-profielen kunnen target_month_hours missen.
+            # Dezelfde niet-destructieve defaults als de rest van de app gebruiken.
+            employee = catalog.profile(next(e for e in current_regimes["employees"] if e["id"] == eid))
+            global_profile = catalog.profile(next(e for e in data["employees"] if e["id"] == eid))
             with st.form("monthly_regime_v027"):
                 max_h = st.number_input("Maximum planuren in deze maand", min_value=1.0,
                                         max_value=250.0, value=float(employee["max_month_hours"]), step=0.5)
