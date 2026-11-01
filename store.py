@@ -346,6 +346,19 @@ def initialize_months(engine) -> None:
         period = period_key(int(legacy.payload["year"]), int(legacy.payload["month"]))
         if s.get(MonthWorkspace, period) is None:
             s.add(MonthWorkspace(period=period, payload=legacy.payload, revision=legacy.revision))
+        # Eenmalige niet-destructieve migratie v0.26. Vóór deze versie kwam
+        # shifts voor ELKE maand uit shared_catalog; leg die effectieve
+        # definities daarom vast voor alle reeds aangemaakte maanden.
+        # Geen revisieverhoging: de effectieve dienstdefinities wijzigen niet.
+        s.flush()
+        effective_shifts = deepcopy(s.get(SharedCatalog, 1).payload.get("shifts", []))
+        for month_row in s.scalars(select(MonthWorkspace)).all():
+            if month_row.payload.get("shift_catalog_v026") is True:
+                continue
+            migrated = dict(month_row.payload)
+            migrated["shifts"] = deepcopy(effective_shifts)
+            migrated["shift_catalog_v026"] = True
+            month_row.payload = migrated
 
 
 def list_month_workspaces(engine) -> list[dict]:
@@ -441,8 +454,18 @@ def create_month_workspace(engine, year: int, month: int, actor: str,
         if s.get(MonthWorkspace, period):
             raise ValueError("Deze maand bestaat al. Selecteer ze in het overzicht.")
         legacy = s.get(Workspace, 1)
+        # De dichtstbijzijnde EERDERE planningsmaand is het uitgangspunt
+        # voor nieuw aangemaakte maanden. Reeds gemaakte maanden behouden
+        # altijd hun eigen diensten wanneer een andere maand verandert.
+        predecessor = s.scalar(select(MonthWorkspace).where(
+            MonthWorkspace.period < period).order_by(MonthWorkspace.period.desc()).limit(1))
         template = merge_shared(legacy.payload, shared.payload)
         state = new_month_payload(year, month, template)
+        if predecessor is not None:
+            state["shifts"] = deepcopy(predecessor.payload["shifts"])
+        else:
+            state["shifts"] = deepcopy(shared.payload.get("shifts", []))
+        state["shift_catalog_v026"] = True
         if source_period is not None:
             if len(source_period) != 2:
                 raise ValueError("Ongeldige bronmaand.")
@@ -450,7 +473,7 @@ def create_month_workspace(engine, year: int, month: int, actor: str,
             if src is None:
                 raise ValueError("De bronmaand bestaat niet.")
             state["demand"] = copy_month_demand_rows(
-                src.payload, year, month, shared.payload.get("shifts", []), copy_mode
+                src.payload, year, month, state["shifts"], copy_mode
             )
         s.add(MonthWorkspace(period=period, payload=state, revision=1))
         _audit(s, actor, f"Nieuwe maand {year}-{month:02d} aangemaakt" +
@@ -490,7 +513,7 @@ def copy_month_workspace_demand(engine, source_year: int, source_month: int,
         if shared is None:
             raise SetupError("Gedeelde dienstcatalogus ontbreekt.")
         demand = copy_month_demand_rows(source.payload, target_year, target_month,
-                                        shared.payload.get("shifts", []), mode)
+                                        target.payload["shifts"], mode)
         if not demand:
             raise ValueError("Deze kopie zou leeg zijn. Kies een andere bronmaand of methode.")
         state = dict(target.payload)
@@ -630,7 +653,23 @@ def save_month_workspace(engine, payload: dict, expected_revision: int, actor: s
         elif who.role not in ("admin", "planner"):
             raise ValueError("Geen toegangsrechten.")
         _approved_leave_protected(s, payload)
+        # Dienstdefinities zijn vanaf v0.26 maandgebonden: wijzig ze nooit
+        # via het gedeelde catalogusobject. De andere gedeelde velden
+        # (controleurs, taken, regels en optimalisatieprofielen) blijven
+        # bewust globaal zoals in v0.25.
+        if payload.get("shift_catalog_v026") is not True:
+            raise ConflictError("De maandcatalogus is verouderd. Herlaad de maand en probeer opnieuw.")
+        if not isinstance(payload.get("shifts"), list):
+            raise ValueError("De maandcatalogus van diensten is ongeldig.")
+        from catalog import validate_shift
+        shift_ids = [item.get("id") for item in payload["shifts"] if isinstance(item, dict)]
+        if len(shift_ids) != len(payload["shifts"]) or len(shift_ids) != len(set(shift_ids)):
+            raise ValueError("De dienstnummers van deze maand moeten uniek zijn.")
+        errors = [issue for shift in payload["shifts"] for issue in validate_shift(shift)]
+        if errors:
+            raise ValueError("Ongeldige maanddiensten: " + " ".join(errors))
         new_shared = shared_fields(payload)
+        new_shared["shifts"] = deepcopy(shared.payload.get("shifts", []))
         changed_global = new_shared != shared.payload
         if changed_global:
             if who.role == "controleur":

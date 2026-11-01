@@ -20,6 +20,11 @@ def shared_fields(payload: dict) -> dict:
 def merge_shared(payload: dict, shared: dict) -> dict:
     combined = deepcopy(payload)
     for key in SHARED_KEYS:
+        # v0.26: bestaande planningsmaanden beschikken over hun eigen
+        # dienstencatalogus. Alleen legacy payloads zonder migratievlag
+        # gebruiken nog de gedeelde lijst.
+        if key == "shifts" and payload.get("shift_catalog_v026") is True:
+            continue
         if key in shared:
             combined[key] = deepcopy(shared[key])
     return combined

@@ -15,16 +15,37 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
+
       - name: Dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest
+
+      - name: Herstel tests-map indien bestanden in hoofdmap staan
+        shell: bash
+        run: |
+          # GitHub-webuploads kunnen de map 'tests/' per ongeluk platmaken.
+          # Alleen in de tijdelijke Actions-runner herstellen; repository blijft ongewijzigd.
+          mkdir -p tests
+          for testfile in test_*.py; do
+            if [ -f "$testfile" ]; then
+              mv -f -- "$testfile" "tests/$testfile"
+            fi
+          done
+          if [ ! -f app.py ]; then
+            echo '::error::app.py staat niet in de hoofdmap van deze repository.'
+            exit 1
+          fi
+          echo "Aantal testmodules: $(find tests -maxdepth 1 -name 'test_*.py' -type f | wc -l)"
+
       - name: Controleer OR-Tools
         run: python -c 'import ortools; print("OR-Tools aanwezig:", ortools.__version__)'
+
       - name: Alle tests, ook solver-integratie
-        run: pytest -q -ra
+        run: pytest -q -ra tests

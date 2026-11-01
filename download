@@ -1,12 +1,2 @@
-__pycache__/
-.pytest_cache/
-*.pyc
-.env
-.streamlit/secrets.toml
-.venv/
-venv/
-*.db
-*.sqlite3
-*.xlsx
-*.json
-.DS_Store
+# Created by pytest automatically.
+*

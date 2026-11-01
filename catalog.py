@@ -188,8 +188,14 @@ def validate_employee(employee: dict, known_shifts: set[str]) -> list[str]:
         errors.append(f"Controleur {key}: ongeldige verboden dienstovergangen.")
     if not set(e["blocked_categories"]).issubset(CATEGORIES):
         errors.append(f"Controleur {key}: onbekende verboden dienstcategorie.")
-    if not set(e["blocked_shifts"]).issubset(known_shifts):
-        errors.append(f"Controleur {key}: onbekend verboden dienstnummer.")
+    # v0.26: individuele verboden dienstcodes zijn gedeeld tussen maanden,
+    # terwijl dienstnummers per maand kunnen verschillen. Een geldige code
+    # uit een latere maand mag een historische maand niet ongeldig maken.
+    blocked = e["blocked_shifts"]
+    if (not isinstance(blocked, list) or len(blocked) > 200 or
+            any(not isinstance(code, str) or not 1 <= len(code.strip()) <= 40
+                for code in blocked) or len(blocked) != len(set(blocked))):
+        errors.append(f"Controleur {key}: ongeldige verboden dienstnummers.")
     if not set(e["blocked_weekdays"]).issubset(set(range(7))):
         errors.append(f"Controleur {key}: ongeldige weekdagbeperking.")
     if e["preferred_category"] not in (*CATEGORIES, "Geen"):
