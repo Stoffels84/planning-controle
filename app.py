@@ -6,7 +6,7 @@ import logging
 import json
 import os
 from dataclasses import asdict
-from datetime import date
+from datetime import date, timedelta
 import calendar
 from itertools import groupby
 
@@ -46,8 +46,10 @@ from shift_edit_v0262 import apply_month_shift
 from activity_move_v0263 import activity_destination, validate_movable_activity
 from hours_v027 import (validate_month_regimes, apply_month_regimes,
                          build_balance_preview, apply_balance_to_solver)
+from preferences_v030 import (POLICY_KEY, PREFERENCE_KINDS, default_policy,
+    policy_for, validate_policy, is_open, counts_for, enforce_submission, belgian_today)
 
-st.set_page_config(page_title="Controleursplanning | v0.29", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.30", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -259,6 +261,81 @@ def to_iso(value) -> str:
     return date.fromisoformat(str(value)[:10]).isoformat()
 
 
+def save_preferences_and_rerun_v030(employee_id: str, changed: dict) -> None:
+    """Bewaar uitsluitend de wensen van de geselecteerde controleur."""
+    old = st.session_state.project_data
+    selected = [p for p in changed.get("preferences", []) if p.get("employee_id") == employee_id]
+    if PERSISTENT:
+        new_revision = store.save_employee_preferences_v030(
+            engine, int(old["year"]), int(old["month"]),
+            int(st.session_state.workspace_revision), current_user["employee_id"],
+            employee_id, selected)
+        refreshed, latest_revision = store.load_month_workspace(engine, int(old["year"]), int(old["month"]))
+        st.session_state.workspace_revision = latest_revision
+        st.session_state.project_data = refreshed
+    else:
+        enforce_submission(policy_for(old), employee_id, selected, manager_override=True,
+                           today=belgian_today())
+        st.session_state.project_data = changed
+    st.session_state.pop("last_plan", None)
+    st.session_state.pop("alternatives_v09", None)
+    st.rerun()
+
+
+def render_preference_policy_v030() -> None:
+    """Beheer van een maandgebonden venster en quota, zonder andere invoer te wijzigen."""
+    data = st.session_state.project_data
+    current = policy_for(data)
+    with st.expander("Indieningsperiode en maximumwensen (v0.30)"):
+        st.caption("Deze regels gelden alleen voor de geselecteerde planningsmaand. "
+                   "0 betekent onbeperkt. Planners kunnen uitzonderingen verwerken. "
+                   "Alle datums volgen de Belgische tijd.")
+        is_limited = current["open_from"] is not None
+        with st.form(f"preference_policy_v030_{data['year']}_{data['month']}"):
+            restrict = st.checkbox("Indiening beperken tot een periode", value=is_limited)
+            today = belgian_today()
+            start_value = (date.fromisoformat(current["open_from"]) if is_limited else today)
+            end_value = (date.fromisoformat(current["open_until"]) if is_limited else today + timedelta(days=30))
+            a, b = st.columns(2)
+            with a:
+                start = st.date_input("Van (inclusief)", value=start_value)
+            with b:
+                end = st.date_input("Tot en met (inclusief)", value=end_value)
+            st.markdown("**Maximum aantal wensen per controleur in deze maand**")
+            caps = {}
+            for kind in PREFERENCE_KINDS:
+                caps[kind] = st.number_input(
+                    f"{PREFERENCE_TYPES[kind]} (0 = onbeperkt)",
+                    min_value=0, max_value=31, step=1,
+                    value=int(current['limits'].get(kind, 0)),
+                    key=f"pref_cap_v030_{data['year']}_{data['month']}_{kind}")
+            submitted = st.form_submit_button("Indieningsregels bewaren")
+        if submitted:
+            policy = {"open_from": start.isoformat() if restrict else None,
+                      "open_until": end.isoformat() if restrict else None,
+                      "limits": caps}
+            issues = validate_policy(policy)
+            if issues:
+                st.error(" ".join(issues))
+            else:
+                try:
+                    if PERSISTENT:
+                        store.save_preference_policy_v030(
+                            engine, data["year"], data["month"],
+                            st.session_state.workspace_revision, current_user["employee_id"], policy)
+                        updated, revision = store.load_month_workspace(engine, data["year"], data["month"])
+                        st.session_state.project_data = updated
+                        st.session_state.workspace_revision = revision
+                    else:
+                        updated = clone()
+                        updated[POLICY_KEY] = policy
+                        st.session_state.project_data = updated
+                    st.session_state.pop("last_plan", None)
+                    st.rerun()
+                except (ValueError, store.ConflictError) as error:
+                    st.error(str(error))
+
+
 
 def render_daily_preferences(eid: str, scope: str) -> None:
     """Mobielvriendelijk: één week tegelijk invullen, alle andere weken behouden."""
@@ -270,7 +347,25 @@ def render_daily_preferences(eid: str, scope: str) -> None:
                       if PERSISTENT else None)
     published_by_date = own_published_assignments(published_view["payload"], eid) if published_view else {}
     counts = preference_summary(data, eid)
+    policy = policy_for(data)
+    manager = scope == "manager"
+    can_submit = manager or is_open(policy, belgian_today())
     st.markdown("### Dienstwensen per week")
+    if policy["open_from"] is None:
+        st.caption("Indiening: doorlopend open (tenzij de beheerder een periode instelt).")
+    else:
+        st.caption(f"Indiening: {policy['open_from']} t.e.m. {policy['open_until']} · "
+                   + ("open" if is_open(policy, belgian_today()) else "gesloten"))
+    if not can_submit:
+        st.warning("De indieningsperiode is gesloten. Je kunt je wensen nog bekijken, "
+                   "maar alleen een planner kan ze nog wijzigen.")
+    if manager:
+        st.caption("Als planner kun je een uitzonderingswijziging doen buiten de periode of maxima.")
+    limits = policy.get("limits", {})
+    limits_used = counts_for(data.get("preferences", []), eid)
+    active_caps = [f"{PREFERENCE_TYPES[k]}: {limits_used[k]}/{n}" for k, n in limits.items() if n]
+    if active_caps:
+        st.caption("Wensenlimieten · " + " · ".join(active_caps))
     st.caption("Selecteer per dag een **concreet dienstnummer** uit de maandbehoefte, "
                "of kies **Liefst vrij**. Een wens is geen gegarandeerde toewijzing of goedgekeurd verlof.")
     c1, c2, c3 = st.columns(3)
@@ -324,15 +419,16 @@ def render_daily_preferences(eid: str, scope: str) -> None:
                 if credits:
                     st.info("Er is een afwezigheid of activiteit geregistreerd op deze datum. "
                             "Een dienstwens heft deze registratie niet op.")
-        submitted = st.form_submit_button("💾 Wensen voor deze week opslaan", use_container_width=True)
+        submitted = st.form_submit_button("💾 Wensen voor deze week opslaan", use_container_width=True,
+                                          disabled=not can_submit)
     if submitted:
         try:
             updated = save_week_choices(data, eid, days, pending)
-        except ValueError as error:
-            st.error(str(error))
-        else:
             st.session_state[f"week_saved_{scope}_{eid}_{visible['key']}"] = True
-            replace_and_rerun(updated)
+            save_preferences_and_rerun_v030(eid, updated)
+        except (ValueError, store.ConflictError) as error:
+            st.session_state.pop(f"week_saved_{scope}_{eid}_{visible['key']}", None)
+            st.error(str(error))
     if st.session_state.pop(f"week_saved_{scope}_{eid}_{visible['key']}", False):
         st.success("De wensen van deze week zijn opgeslagen. Andere weken bleven ongewijzigd.")
     st.caption("Je kunt een andere week kiezen en die afzonderlijk bewaren. "
@@ -385,21 +481,28 @@ def render_preferences(eid: str, scope: str) -> None:
                 pref["transition"] = st.selectbox("Liever niet na elkaar", pairs)
             pref["priority"] = st.select_slider("Prioriteit", options=[1, 2, 3], value=2,
                                                   format_func=lambda x: {1: "Laag", 2: "Normaal", 3: "Hoog"}[x])
-            if st.form_submit_button("Aanvullende voorkeur opslaan"):
+            if st.form_submit_button("Aanvullende voorkeur opslaan", disabled=not (scope == "manager" or is_open(policy_for(data), belgian_today()))):
                 state = clone()
                 state["preferences"] = [p for p in state["preferences"]
                                         if preference_identity(p) != preference_identity(pref)]
                 state["preferences"].append(pref)
-                replace_and_rerun(state)
+                try:
+                    save_preferences_and_rerun_v030(eid, state)
+                except (ValueError, store.ConflictError) as error:
+                    st.error(str(error))
         if own:
             chosen = st.selectbox("Aanvullende voorkeur intrekken", range(len(own)),
                                   format_func=lambda i: PREFERENCE_TYPES[preference_type(own[i])] + " — " + preference_description(own[i]),
                                   key="remove_pref_" + scope)
-            if st.button("Verwijder geselecteerde aanvullende voorkeur", key="remove_button_" + scope):
+            if st.button("Verwijder geselecteerde aanvullende voorkeur", key="remove_button_" + scope,
+                         disabled=not (scope == "manager" or is_open(policy_for(data), belgian_today()))):
                 state = clone()
                 key = preference_identity(own[chosen])
                 state["preferences"] = [p for p in state["preferences"] if preference_identity(p) != key]
-                replace_and_rerun(state)
+                try:
+                    save_preferences_and_rerun_v030(eid, state)
+                except (ValueError, store.ConflictError) as error:
+                    st.error(str(error))
 
 
 def reset_month_ui_state() -> None:
@@ -500,7 +603,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.29 • Rustspreiding, weekendrotatie en urenbalans • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.30 • Indieningsperiode en wensmaxima • Rustspreiding en urenbalans • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -1123,6 +1226,7 @@ elif screen == "Maandbehoefte":
 elif screen == "Voorkeuren":
     st.subheader("Beheer van persoonlijke voorkeuren")
     st.caption("Dagelijks een concreet dienstnummer kiezen uit de maandbehoefte. Ook deze wensen zijn **zacht**: bezetting, rust en inzetbaarheid gaan altijd voor.")
+    render_preference_policy_v030()
     if data["employees"]:
         chosen_pref = st.selectbox("Controleur", [e["id"] for e in data["employees"]],
                                    format_func=lambda i: next(e["name"] for e in data["employees"] if e["id"] == i))

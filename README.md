@@ -1,3 +1,44 @@
+# Controleursplanning v0.30 — indieningsperiodes en maxima voor voorkeuren
+
+Versie 0.30 bouwt voort op de geteste **v0.29**. De voorkeurenmodule heeft nu **maandgebonden indieningsperiodes** en **maxima per voorkeurtype**. Er is geen nieuw databaseschema nodig. Rustspreiding, weekendrotatie, maandregimes, de OR-Tools-planningsmotor, verlofprocedures en eerder gepubliceerde planningen blijven intact.
+
+## Nieuwe functies
+
+- **Planners/beheerders:** ga naar **Voorkeuren → Indieningsperiode en maximumwensen (v0.30)**. Stel voor de actieve planningsmaand een begin- en einddatum in. De begin- en einddatum tellen mee; de applicatie gebruikt de **Belgische kalenderdatum** om het venster automatisch te openen of te sluiten.
+- **Maximumwensen:** stel per controleur een afzonderlijk maximum in voor gewenste vrije dagen, dagelijkse concrete dienstnummers en de overige voorkeurtypes. **0 = onbeperkt**. 'Geen voorkeur' telt niet als wens. De limieten gelden voor de **totale maand**, niet per week.
+- **Controleurs:** zien bij **Mijn voorkeuren** de indieningsperiode, de eventuele maxima en hoeveel wensen ze al gebruikten. Buiten de periode kunnen ze de voorkeuren nog bekijken maar niet opslaan.
+- **Planners:** kunnen uitzonderingen namens een controleur invoeren, ook buiten de termijn of boven een ingestelde limiet. Dit is bewust een beheerdersbevoegdheid; de auditlog registreert de wijziging. Een wens blijft altijd een *zachte* voorkeur, geen gegarandeerde dienst en geen goedgekeurd verlof.
+- **Bestaande maanden:** zonder ingestelde regels blijven wensen **onbeperkt open**. De beheerder moet zelf expliciet de periode en maxima activeren. Nieuwe maanden starten eveneens zonder beperkingen.
+- **Gerichte opslag:** wijzigingen aan één controleurs voorkeuren worden opgeslagen zonder oudere bezettingsafwijkingen of activiteiten te veranderen. De bestaande volledige datasetvalidatie blijft wel gelden wanneer je een nieuwe planning wilt berekenen.
+
+## Installatie
+
+1. Bewaar de werkende v0.29 op GitHub en maak een PostgreSQL-back-up.
+2. Pak `controleursplanning-github-streamlit-v030.zip` uit en upload de **volledige mapinhoud**, mét `.github/workflows` en `tests/`, naar de hoofdmap van de bestaande repository.
+3. Zorg dat **`preferences_v030.py`** naast `app.py`, `store.py` en `portal_v016.py` staat. Vervang de bijgewerkte `app.py` en `store.py`.
+4. Klik op **Commit changes**. Heropen Streamlit. Databaseverbinding, Secrets en bestaande planningen blijven behouden. Er is **geen databasemigratie**.
+5. Kijk bij **GitHub → Actions** of de recente testworkflow groen is; alleen daar kunnen de OR-Tools-tests worden uitgevoerd.
+
+## Korte test
+
+1. Maak in een fictieve maand een indieningsperiode die **vandaag** omvat. Stel bijvoorbeeld maximaal **2 'liefst vrij'** en maximaal **3 concrete dienstwensen** in.
+2. Log in als fictieve controleur. Vul twee vrijwensen in verschillende weken in: beide moeten bewaard blijven. Probeer daarna een derde: die moet met een duidelijke melding geweigerd worden. Een gewone dienstwens telt niet mee bij het maximum voor vrijwensen.
+3. Sluit de indieningsperiode als planner (bijvoorbeeld einddatum gisteren). De controleur kan niets meer opslaan; de planner kan nog wel een uitzonderingswijziging doen.
+4. Controleer of de andere maand zijn eigen voorkeuren en instellingen behoudt. De gepubliceerde planning verandert niet automatisch; na wijzigingen moet een concept opnieuw worden berekend en gepubliceerd.
+5. Controleer GitHub Actions en probeer eventueel een extra voorkeur op te slaan in een oude maand met afwijkende activiteiten: die activiteiten mogen niet veranderen.
+
+## Beperkingen en veiligheid
+
+De indieningsperiode wordt bij **opslaan aan de serverzijde** gecontroleerd; er is geen achtergrondproces nodig om ze te openen/sluiten. De maxima zijn per voorkeurtype, niet gewogen naar prioriteit. Historisch reeds geregistreerde wensen worden **niet automatisch verwijderd** wanneer je het maximum verlaagt; de nieuwe limiet geldt bij een volgende controleurswijziging. Planners kunnen bewust uitzonderingen blijven bewaren. Eerdere op maat gemaakte voorkeuren blijven ondersteund.
+
+Dit project is een **proefomgeving uitsluitend met fictieve gegevens**, nog niet gevalideerd voor echte personeelsgegevens of formele arbeidsregels.
+
+**Lokale testreeks: 316 geslaagd, 14 overgeslagen (OR-Tools niet lokaal geïnstalleerd).** De GitHub Actions-tests en de nieuwe Streamlit-schermen moeten op jouw omgeving nog bevestigd worden.
+
+---
+
+## Eerdere versies en volledige technische handleiding
+
 # Controleursplanning v0.29 — individuele rustspreiding per zeven dagen
 
 Deze versie bouwt voort op de door de gebruiker geteste **v0.28**. Nieuwe functie: een optionele persoonlijke *harde* grens voor het minimum aantal vrije dagen in elk voortschrijdend tijdvak van zeven kalenderdagen. De bestaande weekendrotatie, maandregimes, verlofprocedures, taken, handmatige roosterbewerking en publicatie blijven behouden.

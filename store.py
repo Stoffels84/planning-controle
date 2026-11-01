@@ -22,6 +22,8 @@ from month_copy_v013 import copy_month_demand_rows
 from requests_v010 import leave_days, absence_credit
 from swap_v011 import make_swap_plan, verify_swap_with_solver
 from hours_v027 import validate_month_regimes, apply_month_regimes, build_balance_preview
+from preferences_v030 import (POLICY_KEY, validate_policy, policy_for, enforce_submission,
+                              belgian_today)
 
 
 class SetupError(RuntimeError):
@@ -651,8 +653,16 @@ def save_month_workspace(engine, payload: dict, expected_revision: int, actor: s
                 [p for p in old_prefs if p["employee_id"] != actor] !=
                 [p for p in new_prefs if p["employee_id"] != actor]):
                 raise ValueError("Controleurs mogen alleen hun eigen voorkeuren aanpassen.")
+            original_own = [p for p in old_prefs if p.get("employee_id") == actor]
+            proposed_own = [p for p in new_prefs if p.get("employee_id") == actor]
+            if original_own != proposed_own:
+                enforce_submission(policy_for(original), actor, proposed_own,
+                                   today=belgian_today())
         elif who.role not in ("admin", "planner"):
             raise ValueError("Geen toegangsrechten.")
+        policy_errors = validate_policy(payload.get(POLICY_KEY))
+        if policy_errors:
+            raise ValueError(" ".join(policy_errors))
         _approved_leave_protected(s, payload)
         regime_errors = validate_month_regimes(payload)
         if regime_errors:
@@ -1950,3 +1960,78 @@ def save_min_rest_days_v029(engine, year: int, month: int, expected_revision: in
             work.revision += 1
         _audit(session, actor, f"Minimale vrije dagen per 7 dagen voor {employee_id}: {minimum_days_off} (v0.29)")
         return month_row.revision
+
+
+# v0.30 — gerichte opslag, zonder oude ongeldige dienstbehoefte/activiteiten aan te raken.
+def save_preference_policy_v030(engine, year: int, month: int,
+                               expected_revision: int, actor: str, policy: dict) -> int:
+    """Alleen planner/beheerder mag maandvenster en maxima aanpassen."""
+    from copy import deepcopy
+    errors = validate_policy(policy)
+    if errors:
+        raise ValueError(" ".join(errors))
+    key = period_key(year, month)
+    with session_factory(engine).begin() as session:
+        who = session.get(Account, actor)
+        if not who or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Alleen beheerders en planners kunnen indieningsregels wijzigen.")
+        row = session.scalar(select(MonthWorkspace).where(MonthWorkspace.period == key).with_for_update())
+        if row is None or row.revision != expected_revision:
+            raise ConflictError("Deze maand is intussen aangepast. Herlaad eerst.")
+        if row.payload.get(POLICY_KEY) == policy:
+            return row.revision
+        updated = deepcopy(row.payload)
+        updated[POLICY_KEY] = deepcopy(policy)
+        row.payload = updated
+        row.revision += 1
+        _audit(session, actor, f"Indieningsregels voorkeuren {year}-{month:02d} aangepast (v0.30)")
+        return row.revision
+
+
+def save_employee_preferences_v030(engine, year: int, month: int,
+                                  expected_revision: int, actor: str,
+                                  employee_id: str, preferences: list[dict]) -> int:
+    """Alleen voorkeuren van één controleur wijzigen met autorisatie en quota.
+
+    De overige maandgegevens en goedgekeurde afwezigheden blijven EXACT bewaard.
+    Een manager kan een uitzonderingswijziging doen buiten de indieningsperiode.
+    """
+    from extras import validate_extras
+    if not isinstance(preferences, list) or len(preferences) > 250 or any(
+            not isinstance(p, dict) or p.get("employee_id") != employee_id for p in preferences):
+        raise ValueError("Alleen wensen van de geselecteerde controleur mogen worden opgeslagen.")
+    key = period_key(year, month)
+    with session_factory(engine).begin() as session:
+        who = session.get(Account, actor)
+        if not who or not who.active:
+            raise ValueError("Niet aangemeld of account geblokkeerd.")
+        manager = who.role in ("admin", "planner")
+        if not manager and not (who.role == "controleur" and actor == employee_id):
+            raise ValueError("Je kunt alleen je eigen voorkeuren aanpassen.")
+        row = session.scalar(select(MonthWorkspace).where(MonthWorkspace.period == key).with_for_update())
+        shared = session.get(SharedCatalog, 1)
+        if row is None or shared is None or row.revision != expected_revision:
+            raise ConflictError("Deze maand is intussen aangepast. Herlaad eerst.")
+        merged = merge_shared(row.payload, shared.payload)
+        if employee_id not in {e.get("id") for e in merged.get("employees", [])}:
+            raise ValueError("Deze controleur bestaat niet in de personeelslijst.")
+        submitted = {"year": year, "month": month,
+                     "employees": merged["employees"], "shifts": merged["shifts"],
+                     "preferences": preferences, "hour_credits": []}
+        errors = validate_extras(submitted)
+        if errors:
+            raise ValueError(" ".join(errors))
+        enforce_submission(policy_for(row.payload), employee_id, preferences,
+                           manager_override=manager, today=belgian_today())
+        previous = [p for p in row.payload.get("preferences", [])
+                    if p.get("employee_id") == employee_id]
+        if previous == preferences:
+            return row.revision
+        amended = deepcopy(row.payload)
+        amended["preferences"] = [p for p in amended.get("preferences", [])
+                                   if p.get("employee_id") != employee_id] + deepcopy(preferences)
+        row.payload = amended
+        row.revision += 1
+        _audit(session, actor, f"Wensen {employee_id} {year}-{month:02d} aangepast (v0.30)"
+               + (" door planner" if manager and actor != employee_id else ""))
+        return row.revision
