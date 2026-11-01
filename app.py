@@ -37,8 +37,9 @@ from report_v019 import build_report, safe_excel_rows
 from diagnostics_v021 import analyze_month, explain_open_positions
 from locks_v022 import assignment_key, reoptimization_diff
 from manual_v023 import compile_edits, edit_description, regular_assignments, MAX_EDITS
+from roster_v024 import week_windows, month_days, roster_grid, staffing_grid, workbook_bytes
 
-st.set_page_config(page_title="Controleursplanning | v0.23.1", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.24", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -460,7 +461,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.23.1 • Meerdere handmatige roosterwijzigingen in één keer • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.24 • Roostercontrole per controleur • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -498,7 +499,7 @@ with st.sidebar:
     st.divider()
     st.caption("Niet gekoppeld aan systemen van De Lijn.")
 
-screens = (["Overzicht", "Controleurs", "Diensten", "Taken", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Weekend en maandgrenzen", "Planning", "Optimalisatie vergelijken", "Rapportage en eerlijkheid"]
+screens = (["Overzicht", "Controleurs", "Diensten", "Taken", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Weekend en maandgrenzen", "Planning", "Roostercontrole", "Optimalisatie vergelijken", "Rapportage en eerlijkheid"]
            if is_manager else ["Mijn planning", "Mijn voorkeuren", "Mijn aanvragen & wijzigingen"])
 if PERSISTENT:
     screens += (["Verlofaanvragen beheren", "Ruilaanvragen beheren", "Roosterwijzigingen", "Publicatiebeheer"] if is_manager else ["Mijn verlofaanvragen", "Mijn ruilaanvragen"])
@@ -1259,6 +1260,98 @@ elif screen == "Weekend en maandgrenzen":
                     st.error("Streefwaarden moeten gehele getallen zijn van 0 tot 31.")
     st.caption("Weekendgrenzen en historische dagtellingen tellen diensten op hun startdatum. "
                "Beschermde weekends blokkeren ook overlappende nachtdiensten.")
+
+elif screen == "Roostercontrole":
+    st.subheader("🗓️ Roostercontrole per controleur")
+    st.caption("Alleen-lezen week- en maandoverzicht om de resultaten van de planning en "
+               "handmatige wijzigingen na te kijken. Roosterbewerkingen gebeuren bij **Planning**.")
+    version_options = ["Laatste bewaarde planning", "Laatste gepubliceerde planning"] if PERSISTENT else ["Laatste berekening (demo)"]
+    version_choice = st.radio("Welke planning bekijken?", version_options, horizontal=True,
+                              key="roster_version_v024")
+    record = None
+    plan_data = None
+    if PERSISTENT:
+        try:
+            record = store.load_plan(engine, data["year"], data["month"],
+                                     published_only=version_choice == "Laatste gepubliceerde planning")
+        except Exception:
+            logging.exception("ROSTER_V024_LOAD: rooster kon niet worden opgehaald")
+            st.error("De gekozen planversie kon niet worden opgehaald. Bekijk ROSTER_V024_LOAD in de logboeken.")
+        if record:
+            plan_data = record.get("payload")
+            st.caption(f"Planversie #{record['id']} · "
+                       f"{'Gepubliceerd' if record['published'] else 'Concept'}")
+            if record["revision"] != st.session_state.workspace_revision:
+                st.warning("De invoergegevens zijn sinds deze planversie veranderd. "
+                           "Het rooster is mogelijk niet meer actueel.")
+    else:
+        old_plan = st.session_state.get("last_plan")
+        if old_plan is not None:
+            plan_data = asdict(old_plan)
+    if plan_data is None:
+        st.info("Er is voor deze selectie nog geen bewaarde planning. Bereken eerst een planning "
+                "of kies de gepubliceerde versie wanneer die beschikbaar is.")
+    else:
+        try:
+            teams = sorted({str(p.get("team", "")).strip() for p in data["employees"]
+                            if str(p.get("team", "")).strip()})
+            col_team, col_days, col_times = st.columns([2, 3, 1])
+            with col_team:
+                chosen_team = st.selectbox("Team", ["Alle teams"] + teams,
+                                           key="roster_team_v024")
+            with col_days:
+                weeks = week_windows(data["year"], data["month"])
+                periods = [("month", "Volledige maand")] + [(w["key"], w["label"]) for w in weeks]
+                first_needed_week = next((i for i, w in enumerate(weeks, 1)
+                                         if any(r.get("date") in w["days"] for r in data.get("demand", []))), 0)
+                period_selected = st.selectbox("Periode", periods,
+                                               format_func=lambda x: x[1],
+                                               index=first_needed_week,
+                                               key="roster_period_v024")
+            with col_times:
+                show_hours = st.checkbox("Uren tonen", value=False,
+                                         key="roster_hours_v024")
+            team_people = [p for p in data["employees"] if
+                           (chosen_team == "Alle teams" or str(p.get("team", "")).strip() == chosen_team)]
+            active_only = st.checkbox("Alleen actieve controleurs", value=True,
+                                      key="roster_active_v024")
+            possible = [p for p in team_people if p.get("active", True) or not active_only]
+            names = {str(p["id"]): str(p.get("name", p["id"])) for p in possible}
+            chosen_ids = st.multiselect("Controleurs (leeg = iedereen binnen filter)",
+                                        list(names), format_func=lambda eid: f"{names[eid]} ({eid})",
+                                        key="roster_people_v024")
+            chosen = chosen_ids or list(names)
+            selected_days = (month_days(data["year"], data["month"])
+                             if period_selected[0] == "month" else
+                             next(w["days"] for w in weeks if w["key"] == period_selected[0]))
+            matrix = roster_grid(data, plan_data, selected_ids=chosen,
+                                 days=selected_days, show_times=show_hours)
+            coverage = staffing_grid(data, plan_data, days=selected_days)
+            a, b, c, d = st.columns(4)
+            a.metric("Controleurs", matrix["people"])
+            b.metric("Reguliere toewijzingen", matrix["regular_assignments"])
+            c.metric("Open dienstplaatsen", sum(r["Open"] for r in coverage))
+            d.metric("Extra toewijzingen", sum(r["Extra"] for r in coverage))
+            st.caption("— = geen dienst toegewezen. Zelfstandige taken en activiteiten staan "
+                       "als 'Taak' vermeld; ze tellen niet mee bij de reguliere dienstplaatsen. "
+                       "Bezettingscijfers onderaan gelden voor alle controleurs, ook als je het rooster filtert.")
+            st.dataframe(pd.DataFrame(matrix["rows"],
+                                      columns=["Controleur", "Personeelsnr"] + matrix["columns"]),
+                         hide_index=True, use_container_width=True, height=430)
+            with st.expander("📊 Bezetting per dag", expanded=False):
+                st.dataframe(pd.DataFrame(coverage), hide_index=True, use_container_width=True)
+            st.download_button("⬇️ Download roostercontrole (Excel)",
+                               workbook_bytes(matrix, coverage),
+                               file_name=f"roostercontrole-{data['year']}-{data['month']:02d}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="roster_export_v024")
+            st.info("Dit is een controleweergave, geen formele validatie van arbeidsregels. "
+                    "Voor wijzigingen gebruik je **Planning → Handmatige roosterbewerking**.")
+        except (ValueError, KeyError, TypeError) as error:
+            st.error(f"Roosteroverzicht kon niet worden opgebouwd: {error}")
+        except Exception:
+            logging.exception("ROSTER_V024_RENDER: onverwachte fout")
+            st.error("Roosteroverzicht niet beschikbaar. Bekijk ROSTER_V024_RENDER in de logboeken.")
 
 elif screen == "Planning":
     st.subheader("Automatisch plannen met Google OR-Tools")
