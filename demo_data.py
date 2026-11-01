@@ -70,6 +70,6 @@ def build_demo(year: int | None = None, month: int | None = None) -> dict:
         "shifts": shifts,
         "demand": demand,
         "preferences": preferences,
-        "settings": {"min_rest_hours": 11, "max_consecutive": 5, "time_limit_seconds": 10,
+        "settings": {"min_rest_hours": 11, "max_consecutive": 5, "time_limit_seconds": 300,
                      "preference_weight": 25, "fairness_weight": 1},
     }

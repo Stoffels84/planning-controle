@@ -1,48 +1,33 @@
-# Controleursplanning v0.24 — roostercontrole voor beheerders
+# Controleursplanning v0.24.1 — rekentijd tot 60 minuten
 
-> **Proefversie — uitsluitend fictieve gegevens.** Niet geschikt voor echte persoonsgegevens of operationele inzet voordat de beveiliging, privacy en arbeidsregels afzonderlijk zijn gevalideerd.
+> **Proefversie — uitsluitend fictieve gegevens.** Niet geschikt voor echte persoonsgegevens of operationele inzet zonder afzonderlijke validatie van beveiliging, privacy en arbeidsregels.
 
-## Wat is nieuw?
+## Wat is aangepast ten opzichte van v0.24?
 
-Voor beheerders en planners is er een nieuw onderdeel **Roostercontrole**. Dit is een **alleen-lezen** weergave van een bestaande, opgeslagen planning: de bestaande handmatige roosterbewerking uit versie 0.23 blijft ongewijzigd en is nog steeds te vinden onder **Planning**.
+In **Planning → Automatisch plannen met Google OR-Tools** had het invoerveld **Maximale rekentijd (seconden)** een bovengrens van **120 seconden**. Dat is nu **3.600 seconden (60 minuten)**. Deze waarde werd al geaccepteerd door de gegevensvalidatie en de gewone OR-Tools-planningsmotor; de wijziging zit in de gebruikersinterface.
 
-- Bekijk **de nieuwste bewaarde planversie** (concept of publicatie) of kies expliciet **de laatst gepubliceerde planning**.
-- Bekijk een **weekmatrix of volledige maandmatrix** met controleurs in de rijen en datums in de kolommen. De standaardselectie is de eerste week waarin dienstbehoefte voorkomt.
-- Filter op **team**, actieve controleurs en één of meerdere specifieke controleurs. **Uren tonen** kan afzonderlijk worden ingeschakeld.
-- Reguliere diensten tonen het **dienstnummer**; bijzondere taken worden met **Taak** aangeduid. Verschillende werkzaamheden op één dag blijven zichtbaar. Een zelfstandige taak wordt niet dubbel getoond wanneer deze in meerdere solverlijsten staat.
-- Bekijk **bezetting per dag**: benodigde plaatsen, reguliere invulling, openstaande plaatsen en extra inzet.
-- Download de geselecteerde matrix en de bezettingscijfers naar **Excel** (tabbladen `Roostermatrix` en `Bezetting`). Geïmporteerde namen en codes worden tegen Excel-formule-injectie beschermd.
-- Bij een oudere, niet meer actuele planversie verschijnt een waarschuwing. De bezettingscijfers gebruiken de huidige maandbehoefte en zijn in die situatie slechts indicatief.
+- Het veld laat **1–3.600 seconden** toe, met stapjes van 30 seconden. Je kunt een precieze waarde rechtstreeks intypen.
+- Nieuwe fictieve demogegevens beginnen met **300 seconden** als standaard. **Bestaande opgeslagen maanden en instellingen worden niet automatisch veranderd**: pas de waarde aan en klik **Instellingen opslaan**.
+- Bij een lange rekentijd verschijnt een toelichting: **laat het browsertabblad geopend**. Streamlit Community Cloud biedt in deze app **geen gegarandeerde achtergrondberekening** als de sessie verdwijnt of de server herstart.
+- De speciale solvercontrole voor dienstwissels behoudt de bestaande limiet van 15 seconden en wordt bewust niet gewijzigd.
+- Er zijn **geen wijzigingen** aan database, accounts, meldingen, verlof, handmatige roosterbewerking, planversies of de solverlogica.
 
-**Let op:** de bezettingstabel blijft een overzicht van **alle controleurs**, ook als de roostermatrix op één team of persoon gefilterd is. Zo is het totaal niet misleidend afhankelijk van een filter. Een streepje (`—`) betekent **geen opdracht toegewezen**, niet noodzakelijk goedgekeurd verlof of een rustdag.
+## Installatie als je v0.24 gebruikt
 
-## Installatie vanaf v0.23.1
+1. Bewaar je huidige GitHub-commit als herstelpunt; maak bij voorkeur een databaseback-up.
+2. Vervang in je GitHub-repository **`app.py`** door het meegeleverde bestand. Dit is voldoende om de 120-secondenlimiet weg te nemen.
+3. Vervang optioneel ook **`demo_data.py`** als je wilt dat *nieuwe fictieve demo-maanden* standaard 300 seconden krijgen in plaats van 10 seconden. Bestaande maanden blijven ongewijzigd.
+4. Commit en herlaad je Streamlit-app. Wijzig je bestaande PostgreSQL-database en Streamlit Secrets niet.
 
-1. Maak een back-up van de PostgreSQL-database en bewaar je werkende GitHub-commit van v0.23.1 als herstelpunt.
-2. Download `controleursplanning-github-streamlit-v024.zip` en pak het uit.
-3. Upload alle projectbestanden naar de root van je bestaande **private GitHub-repository**. Wanneer je rechtstreeks van **exact v0.23.1** updatet, volstaan de bijgewerkte `app.py` en het nieuwe `roster_v024.py` (plus eventueel README/tests).
-4. Commit en heropen de bestaande Streamlit-app. **Wijzig niets** aan `DATABASE_URL`, accounts, Secrets of je bestaande database.
-5. Upload geen `__pycache__`, `.pytest_cache` of lokale secrets. Er is geen migratie of nieuw databasetabel nodig.
+Het ZIP-pakket bevat het **volledige project**, voor wie liever alle bestanden samen bijwerkt.
 
-## Online testen met fictieve gegevens
+## Testprocedure
 
-1. Open als **beheerder of planner** een maand waarvoor al een conceptplanning of publicatie bestaat.
-2. Klik **Roostercontrole**. Selecteer de nieuwste planversie. Controleer of elke controleur de juiste dienstnummers per dag heeft.
-3. Filter op een specifiek **team** en daarna op één **controleur**. De roosterregels moeten veranderen, maar het **bezettingsoverzicht** niet.
-4. Verander tussen weekweergave en volledige maand en activeer **Uren tonen**.
-5. Kies **Laatste gepubliceerde planning** om die te vergelijken met het laatste concept. Nieuwe conceptwijzigingen mogen de gepubliceerde weergave niet veranderen.
-6. Download de Excel-export en controleer `Roostermatrix` en `Bezetting`.
-7. Open **Planning → Handmatige roosterbewerking (v0.23)**. Bewerk een fictieve dienst en maak een nieuw concept. Controleer in **Roostercontrole** hoe het concept afwijkt van de gepubliceerde versie.
-8. Meld je als controleur aan. Het nieuwe tabblad **Roostercontrole** mag niet beschikbaar zijn. Controleurs gebruiken hun bestaande eigen portaal.
-
-## Techniek en grenzen
-
-- **Nieuwe module:** `roster_v024.py` met functies `month_days`, `week_windows`, `roster_grid`, `staffing_grid` en `workbook_bytes`.
-- **Aanpassing:** `app.py` krijgt een extra beheerdersonderdeel en het bijgewerkte versienummer.
-- **Geen wijzigingen** in `planner.py`, `store.py`, de solver, regels, database, autorisatiemodel of bestaande aanvragen.
-- Roostercontrole ondersteunt oude planningsrecords met ontbrekende optionele velden. Onbekende, niet langer in de personeelscatalogus aanwezige medewerkers worden niet zomaar als extra controleur weergegeven.
-- De matrix is **niet bewerkbaar** en vormt **geen formele toets van arbeidstijdregels**. Voor wijzigingen blijf je de bestaande solvergestuurde handmatige editor gebruiken.
-- Bij afwijkende invoergegevens kunnen bezettingscijfers niet overeenkomen met de historische planningssamenvatting. De applicatie geeft daar een verouderingswaarschuwing voor.
+1. Open als beheerder **Planning** en kijk bij **Maximale rekentijd (seconden)**.
+2. Voer **300**, **600** of **1.800** in, klik **Instellingen opslaan**, en herlaad het scherm.
+3. Controleer of je gekozen getal bewaard blijft.
+4. Voer met fictieve gegevens een planning uit met langere rekentijd en vergelijk de bezetting met de eerdere 120-secondenberekening.
+5. Hou je browsertabblad open tijdens het rekenen. Een langere ingestelde rekentijd is een **bovengrens**, geen garantie dat de berekening zo lang loopt of altijd beter wordt.
 
 ## Tests
 
@@ -51,8 +36,8 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-Bij het samenstellen: **218 geslaagd, 11 overgeslagen**. De overgeslagen modules bevatten integratietests die OR-Tools vereisen; de volledige onlinetest van de Streamlit-interface en solver gebeurt in jouw proefomgeving. De nieuwe tests staan in `tests/test_v024_roster.py`.
+Bij het samenstellen van deze release: **222 tests geslaagd, 11 overgeslagen** (OR-Tools niet geïnstalleerd in de testomgeving). De Streamlit-interface en de solver met hoge limiet moeten nog in jouw online omgeving worden gecontroleerd. Nieuwe regressietests: `tests/test_v0241_solver_timeout_setting.py`.
 
-## Bestaande functionaliteiten
+## Verder
 
-Alle functies uit v0.23.1 blijven bestaan: aparte maandwerkruimtes, kopiëren van maandbehoefte, personeels- en dienstencatalogus, dienstwensen, aanvragen en intrekkingen, taken, dienstwissels, meldingen, weekend-/maandgrenscontroles, planning en heroptimalisatie, handmatige roosterbewerking, publicaties, diagnoserapporten en Excel-export. De oude dubbele v0.22-bediening blijft verwijderd.
+Alle functionaliteit van v0.24 blijft aanwezig. Er is **geen achtergrondtaak of autosave** toegevoegd: de gebruiker moet de applicatie openhouden tijdens een lange berekening en vervolgens het resultaat volgens het bestaande proces bewaren/publiceren.

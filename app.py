@@ -39,7 +39,7 @@ from locks_v022 import assignment_key, reoptimization_diff
 from manual_v023 import compile_edits, edit_description, regular_assignments, MAX_EDITS
 from roster_v024 import week_windows, month_days, roster_grid, staffing_grid, workbook_bytes
 
-st.set_page_config(page_title="Controleursplanning | v0.24", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.24.1", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -461,7 +461,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.24 • Roostercontrole per controleur • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.24.1 • Instelbare rekentijd tot 3.600 seconden • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -1364,8 +1364,16 @@ elif screen == "Planning":
             max_consecutive = st.number_input("Max. opeenvolgende werkdagen", 1, 7,
                                               int(data["settings"]["max_consecutive"]))
         with col2:
-            time_limit = st.number_input("Maximale rekentijd (seconden)", 1, 120,
-                                         int(data["settings"]["time_limit_seconds"]))
+            time_limit = st.number_input(
+                "Maximale rekentijd (seconden)",
+                min_value=1,
+                max_value=3600,
+                value=int(data["settings"]["time_limit_seconds"]),
+                step=30,
+                help="Maximum 3.600 seconden (60 minuten). Bewaar de instelling vóór je berekent. "
+                     "Laat de browser open: Streamlit Community Cloud biedt geen gegarandeerde "
+                     "achtergrondverwerking bij het sluiten van de sessie.",
+            )
         with col3:
             pref_weight = st.slider("Belang voorkeuren", 0, 100, int(data["settings"]["preference_weight"]))
             fair_weight = st.slider("Belang eerlijke verdeling", 0, 100, int(data["settings"]["fairness_weight"]))
@@ -1375,6 +1383,9 @@ elif screen == "Planning":
                                        "time_limit_seconds": time_limit, "preference_weight": pref_weight,
                                        "fairness_weight": fair_weight})
             replace_and_rerun(state)
+    if int(data["settings"]["time_limit_seconds"]) >= 600:
+        st.caption("Bij lange berekeningen: laat dit browsertabblad open. "
+                   "Een gesloten sessie of herstart van Streamlit kan de berekening onderbreken.")
     errors = validate_dataset(data)
     for error in errors:
         st.error(error)
