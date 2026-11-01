@@ -11,6 +11,7 @@ from datetime import date, datetime, time, timedelta
 from catalog import is_unavailable_during, profile, settings_with_defaults, transition_code
 from extras import rest_blocked_during
 from policy_v06 import saturday_for, touches_protected_weekend
+from weekend_v028 import violating_weekend_streaks
 
 CATEGORIES = ("Vroeg", "Dag", "Laat", "Nacht")
 VERSION = 1
@@ -211,6 +212,18 @@ def verify_plan(data: dict, result: dict, boundaries: list[dict] | None = None) 
                 set(settings.get("blocked_transitions", [])) | set(emp.get("blocked_transitions", []))
             ):
                 errors.append(f"{eid}: verboden overgang {pcat}>{ncat} op {nday}.")
+        # v0.28: onafhankelijke controle van weekendreeksen, inclusief
+        # een gepubliceerd buurrooster als die maand beschikbaar is.
+        streak_cap = emp.get("max_consecutive_worked_weekends")
+        if streak_cap is not None:
+            month_days = [item[0] for item in rows
+                          if current_start <= item[0] <= current_last]
+            adjacent_days = [item[0] for item in rows
+                             if item[0] < current_start or item[0] > current_last]
+            for window in violating_weekend_streaks(month_days, adjacent_days, streak_cap):
+                errors.append(f"{eid}: meer dan {streak_cap} opeenvolgende gewerkte weekends "
+                              f"vanaf {window[0]}.")
+                break
         # Exacte kalenderdagvensters, ook over de maandgrens.
         days = {item[0] for item in rows}
         cat_days = defaultdict(set)

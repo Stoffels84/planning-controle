@@ -21,6 +21,7 @@ from catalog import (is_unavailable_during, profile, settings_with_defaults, tra
                      validate_employee, validate_shift, validate_schedule_settings)
 from extras import preference_type, rest_blocked_during, validate_extras
 from policy_v06 import touches_protected_weekend, saturday_for
+from weekend_v028 import sliding_windows
 from tasks_v07 import task_bounds, validate_tasks, need_mode, standalone_code, standalone_bounds
 from optimization_v09 import validate_profiles
 from boundary_v015 import validate_boundary_rows
@@ -457,13 +458,32 @@ def solve_month(data: dict, fixed_plan: dict | None = None,
                           if n is not None]
         if weekend_maxima:
             model.add(sum(weekend_vars[ei]) <= min(weekend_maxima))
-        if emp["max_worked_weekends"] is not None:
-            weekend_used = []
+        # v0.28: één variabele per weekend, ongeacht za + zo. Een weekend
+        # dat ook in een gepubliceerde buurmaand voorkomt, telt eenmaal.
+        run_cap = emp.get("max_consecutive_worked_weekends")
+        weekend_flags = {}
+        if emp["max_worked_weekends"] is not None or run_cap is not None:
             for saturday, assigned in worked_weekends[ei].items():
                 worked = model.new_bool_var(f"worked_weekend_{ei}_{saturday}")
                 model.add_max_equality(worked, assigned)
-                weekend_used.append(worked)
-            model.add(sum(weekend_used) <= emp["max_worked_weekends"])
+                weekend_flags[date.fromisoformat(saturday)] = worked
+        if emp["max_worked_weekends"] is not None:
+            model.add(sum(weekend_flags.values()) <= emp["max_worked_weekends"])
+        if run_cap is not None:
+            history_saturdays = {
+                saturday_for(date.fromisoformat(item["date"]))
+                for item in boundary_by_employee[emp["id"]]
+                if date.fromisoformat(item["date"]).weekday() >= 5
+            }
+            visible = set(weekend_flags) | history_saturdays
+            for window in sliding_windows(visible, run_cap):
+                editable = [weekend_flags[s] for s in window
+                            if s in weekend_flags and s not in history_saturdays]
+                # Historie alleen mag een nieuwe berekening niet onmogelijk
+                # maken; blokkeer uitsluitend extra werkdagen in zo'n venster.
+                if editable:
+                    fixed_count = sum(s in history_saturdays for s in window)
+                    model.add(sum(editable) <= max(0, run_cap - fixed_count))
 
     # v0.15 — opeenvolgende werkdagen en dienstcategorieën over de maandgrens.
     # Een kalenderdag met een gepubliceerde dienst telt als één gewerkte dag.

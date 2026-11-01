@@ -20,6 +20,7 @@ from extras import (PREFERENCE_TYPES, CREDIT_TYPES, REST_MODES, preference_type,
 import store
 import catalog
 from policy_v06 import weekend_start_dates, hours_overview, service_overview
+from weekend_v028 import MAX_STREAK_SETTING
 from history_v07 import aggregate_history, apply_published_history
 from tasks_v07 import validate_tasks, MODES, need_mode
 from optimization_v09 import (WEIGHT_KEYS, DEFAULTS, options_for, with_profile,
@@ -45,7 +46,7 @@ from activity_move_v0263 import activity_destination, validate_movable_activity
 from hours_v027 import (validate_month_regimes, apply_month_regimes,
                          build_balance_preview, apply_balance_to_solver)
 
-st.set_page_config(page_title="Controleursplanning | v0.27.2", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.28", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -498,7 +499,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.27.1 • Maandregimes en indicatieve urenbalans • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.28 • Individuele weekendrotatie en urenbalans • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -1536,6 +1537,36 @@ elif screen == "Weekend en maandgrenzen":
                     replace_and_rerun(new_state)
                 except ValueError:
                     st.error("Streefwaarden moeten gehele getallen zijn van 0 tot 31.")
+        st.markdown("#### Weekendrotatie (v0.28)")
+        st.caption("Individuele harde regel: maximaal 1–4 **opeenvolgende gewerkte weekends**. "
+                   "Zaterdag en zondag van hetzelfde weekend tellen samen als één. "
+                   "Een gepubliceerd rooster van de vorige of volgende maand wordt meegenomen "
+                   "als dat bestaat. Dit is een globale personeelsregel, voor alle maanden.")
+        old_cap = person.get("max_consecutive_worked_weekends")
+        cap_options = [None] + list(range(1, MAX_STREAK_SETTING + 1))
+        cap = st.selectbox("Maximum opeenvolgende gewerkte weekends",
+                           cap_options, index=cap_options.index(old_cap) if old_cap in cap_options else 0,
+                           format_func=lambda v: "Geen maximum (uit)" if v is None else str(v),
+                           key=f"v028_streak_{selected}_{data['year']}_{data['month']}")
+        if st.button("Weekendrotatie bewaren", key="v028_save_streak"):
+            try:
+                if PERSISTENT:
+                    store.save_weekend_streak_v028(
+                        engine, int(data["year"]), int(data["month"]),
+                        int(st.session_state.workspace_revision),
+                        current_user["employee_id"], selected, cap)
+                    fresh, rev = store.load_month_workspace(engine, int(data["year"]), int(data["month"]))
+                    st.session_state.project_data, st.session_state.workspace_revision = fresh, rev
+                else:
+                    state = clone()
+                    next(e for e in state["employees"] if e["id"] == selected)[
+                        "max_consecutive_worked_weekends"] = cap
+                    st.session_state.project_data = state
+                st.session_state.pop("last_plan", None)
+                st.session_state.pop("alternatives_v09", None)
+                st.rerun()
+            except (ValueError, store.ConflictError) as exc:
+                st.error(str(exc))
     st.caption("Weekendgrenzen en historische dagtellingen tellen diensten op hun startdatum. "
                "Beschermde weekends blokkeren ook overlappende nachtdiensten.")
 

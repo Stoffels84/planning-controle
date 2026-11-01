@@ -1,3 +1,39 @@
+# Controleursplanning v0.28 — weekendrotatie
+
+Deze versie bouwt voort op de werkende **v0.27.2** en voegt één nieuwe, **optionele** harde rotatieregel toe. De bestaande solver, handmatige bewerkingen, maanduren, verlof, koppelingen en publicatie blijven aanwezig.
+
+## Nieuwe instelling
+
+In **Weekend en maandgrenzen → Individueel weekend- en maandprofiel → Weekendrotatie (v0.28)** kun je per controleur het maximum aantal **opeenvolgende gewerkte weekends** instellen op **1, 2, 3 of 4**. Standaard staat de regel op *Geen maximum (uit)*. Hiermee kun je bijvoorbeeld afdwingen dat een controleur hoogstens twee weekends achter elkaar werkt.
+
+Een gewerkt weekend is een dienst (of zelfstandige taak) die op **zaterdag of zondag begint**; zaterdag én zondag van hetzelfde weekend tellen samen als één. Een op vrijdag begonnen nachtdienst telt volgens de bestaande startdatumdefinitie niet als weekenddienst voor de reekstelling. Verplicht vrije weekends blijven apart beschermd tegen overlap. Dit zijn **proefregels, geen gevalideerde De Lijn-arbeidsregels**.
+
+De solver gebruikt voor het respecteren van de reeks de laatst **gepubliceerde planning van de onmiddellijk vorige en volgende maand**, voor zover beschikbaar. Zonder die publicatie kan de app nog geen volledige garantie over de maandgrens geven. De zelfstandige roostercontrole toetst dezelfde reeks na de berekening. Deze maximumreeks wordt opgeslagen als **globale instelling op het controleursprofiel** en geldt voor alle bestaande/nieuwe maanden. Aanpassing verhoogt alle maandrevisies, zodat eerdere concepten niet zonder herberekening gepubliceerd worden. Gepubliceerde versies blijven onveranderd.
+
+## Installatie
+
+1. Maak een herstelpunt van de werkende versie 0.27.2 en een **PostgreSQL-back-up**.
+2. Pak `controleursplanning-github-streamlit-v028.zip` uit en upload **alle projectbestanden met hun mapstructuur** naar dezelfde GitHub-repository. Vervang zeker `app.py`, `store.py`, `planner.py`, `catalog.py`, `policy_v06.py`, `validator_v025.py` en voeg **`weekend_v028.py`** toe in dezelfde hoofdmap. Plaats beide nieuwe `test_v028_*` modules in de map `tests/`.
+3. Laat de Streamlit Secrets (`DATABASE_URL` enzovoort) ongewijzigd. Er is **geen nieuwe databasetabel** vereist.
+4. Controleer in GitHub Actions of `Alle tests, ook solver-integratie` slaagt. De OR-Tools-tests kunnen niet lokaal worden uitgevoerd in de ontwikkelomgeving.
+
+## Testscenario
+
+- Controleur A: maximum opeenvolgende gewerkte weekends = **1**.
+- Voeg fictieve dienstbehoefte toe voor 7, 14 en 21 november 2026.
+- De solver mag A niet in beide weekends van 7 en 14 november zetten; **7 en 21 november mogen wel**.
+- Publiceer een vorige testmaand met werk op **31 oktober** en probeer A in te zetten op **7 november**. Dat moet worden voorkomen; **1 november** is hetzelfde weekend als 31 oktober en wordt niet dubbel geteld.
+- Zet de instelling terug op *Geen maximum (uit)* en controleer of de overige, bestaande weekendregels blijven werken.
+- Controleer dat `Weekendrotatie bewaren` ook slaagt als andere oude maandgegevens nog een bekende inconsistentie bevatten. Die overige fouten blijven zichtbaar en moeten vóór een nieuwe berekening hersteld zijn.
+
+## Grenzen en veiligheid
+
+De beschikbare gepubliceerde aangrenzende maanden worden meegenomen maar **niet-gepubliceerde of verder gelegen maanden** worden niet verondersteld bekend te zijn. De weekendrotatie alleen garandeert geen volledige arbeidsrechtelijke conformiteit. De instelling wordt gericht opgeslagen zonder oude verlofregistraties, diensten, bezetting of maandregimes te veranderen. Reeds gepubliceerde roosters wijzigen niet automatisch. Blijf alleen fictieve gegevens gebruiken tot alle eisen, regels, beveiliging en hosting zijn vrijgegeven.
+
+---
+
+## Eerdere functies en handleiding
+
 # Controleursplanning v0.27.2 — maandregime opslaan zonder foutieve oude maandinvoer te wijzigen
 
 **Gerichte herstelupdate voor v0.27.1.** Bij het opslaan van bijvoorbeeld 160 maximale planuren en 154 streefuren kreeg de gebruiker een groot aantal meldingen over `L301`, `V102` en een onbekende activiteit. De oorzaak was `replace_data`: die valideerde onbedoeld de **volledige** maand, hoewel alleen de urenregeling werd aangepast.

@@ -35,6 +35,7 @@ def profile(employee: dict) -> dict:
     result.setdefault("target_month_categories", {})
     result.setdefault("max_weekend_days", None)
     result.setdefault("max_worked_weekends", None)
+    result.setdefault("max_consecutive_worked_weekends", None)  # v0.28: None = uit
     result.setdefault("protected_weekends", [])
     result.setdefault("historic_weekend_days", 0)
     result.setdefault("opening_hour_balance", 0.0)
@@ -63,6 +64,7 @@ def new_employee(identifier: str, name: str, team: str, contract_percent: int, m
         "blocked_weekdays": [], "blocked_periods": [], "preferred_category": "Geen",
         "max_month_categories": {}, "target_month_categories": {},
         "max_weekend_days": None, "max_worked_weekends": None,
+        "max_consecutive_worked_weekends": None,
         "protected_weekends": [], "historic_weekend_days": 0,
         "opening_hour_balance": 0.0, "qualifications": [], "blocked_tasks": [], "active": True,
     }

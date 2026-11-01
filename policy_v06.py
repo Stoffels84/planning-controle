@@ -44,6 +44,9 @@ def touches_protected_weekend(employee: dict, start: datetime, end: datetime) ->
 def validate_v06_employee(employee: dict) -> list[str]:
     errors = []
     eid = employee.get('id', '?')
+    from weekend_v028 import validate_weekend_streak
+    if not validate_weekend_streak(employee.get("max_consecutive_worked_weekends")):
+        errors.append(f"Controleur {eid}: maximum opeenvolgende weekends moet 1–4 zijn of leeg.")
     for name in ('max_weekend_days', 'max_worked_weekends'):
         val = employee.get(name)
         if val is not None and (type(val) is not int or not 0 <= val <= 10):

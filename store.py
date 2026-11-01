@@ -1872,3 +1872,41 @@ def decide_swap(engine, request_id: int, actor: str, approve: bool, validator=No
         _audit(s, actor, f"Ruilaanvraag #{r.id} {r.status}" +
                (f"; nieuwe planversie {r.new_plan_id}" if r.new_plan_id else ""))
         return _swap_dict(r)
+
+
+
+def save_weekend_streak_v028(engine, year: int, month: int, expected_revision: int,
+                             actor: str, employee_id: str, maximum: int | None) -> int:
+    """Bewaar één persoonlijke, globale weekendregel zonder maandfouten aan te raken.
+
+    Verhoog alle maandrevisies: bestaande concepten moeten worden herberekend.
+    Gepubliceerde versies blijven volledig onaangeroerd.
+    """
+    from weekend_v028 import validate_weekend_streak
+    if not validate_weekend_streak(maximum):
+        raise ValueError("Maximum opeenvolgende weekends moet 1–4 zijn of uitgeschakeld.")
+    if type(expected_revision) is not int or expected_revision < 0:
+        raise ValueError("Ongeldige revisie.")
+    key = period_key(year, month)
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        if who is None or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Alleen beheerders en planners mogen weekendregels instellen.")
+        shared = s.scalar(select(SharedCatalog).where(SharedCatalog.id == 1).with_for_update())
+        row = s.scalar(select(MonthWorkspace).where(MonthWorkspace.period == key).with_for_update())
+        if shared is None or row is None or row.revision != expected_revision:
+            raise ConflictError("De maandgegevens zijn ondertussen aangepast. Herlaad eerst.")
+        updated = deepcopy(shared.payload)
+        matches = [emp for emp in updated.get("employees", []) if emp.get("id") == employee_id]
+        if len(matches) != 1:
+            raise ValueError("Controleur niet gevonden in de gedeelde catalogus.")
+        if matches[0].get("max_consecutive_worked_weekends") == maximum:
+            return row.revision
+        matches[0]["max_consecutive_worked_weekends"] = maximum
+        shared.payload = updated
+        # De globale personeelscatalogus is gewijzigd; oude concepten van
+        # ALLE bestaande maanden zijn daardoor mogelijk verouderd.
+        for work in s.scalars(select(MonthWorkspace)).all():
+            work.revision += 1
+        _audit(s, actor, f"Weekendreeks {employee_id} ingesteld op {maximum} (v0.28)")
+        return row.revision
