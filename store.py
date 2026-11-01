@@ -691,6 +691,65 @@ def save_month_workspace(engine, payload: dict, expected_revision: int, actor: s
 
 
 
+
+def save_month_regime_v0272(engine, year: int, month: int, expected_revision: int,
+                            actor: str, employee_id: str, regime: dict | None) -> int:
+    """Wijzig alleen het maandgebonden urenregime, ook bij historische invoerfouten.
+
+    Deze functie voert géén volledige datasetvalidatie uit: verouderde
+    dienstbehoefte of activiteiten mogen een afzonderlijke ureninstelling
+    niet blokkeren. Zij blijven exact ongewijzigd en moeten nog steeds
+    hersteld zijn vóór de solver mag berekenen.
+
+    Alle rechten en concurrency-checks worden aan de serverzijde afgedwongen.
+    Een bestaande gepubliceerde versie blijft intact; de maandrevisie stijgt,
+    zodat oude concepten bij publicatie opnieuw moeten worden gecontroleerd.
+    """
+    key = period_key(year, month)
+    if type(expected_revision) is not int or expected_revision < 0:
+        raise ValueError("Ongeldige maandrevisie.")
+    if not isinstance(employee_id, str) or not employee_id:
+        raise ValueError("Selecteer een geldige controleur.")
+    if regime is not None and not isinstance(regime, dict):
+        raise ValueError("Ongeldige urenregeling.")
+    with session_factory(engine).begin() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Alleen planners en beheerders mogen maandregimes aanpassen.")
+        shared = s.scalar(select(SharedCatalog).where(SharedCatalog.id == 1).with_for_update())
+        row = s.scalar(select(MonthWorkspace).where(MonthWorkspace.period == key).with_for_update())
+        if not shared or not row or row.revision != expected_revision:
+            raise ConflictError("De maandgegevens zijn ondertussen veranderd. Vernieuw eerst de pagina.")
+        employees = shared.payload.get("employees", [])
+        if not isinstance(employees, list) or employee_id not in {
+            e.get("id") for e in employees if isinstance(e, dict)
+        }:
+            raise ValueError("Deze controleur staat niet meer in het personeelsbestand.")
+        updated = deepcopy(row.payload)
+        previous = updated.get("month_hour_regimes_v027", {})
+        if not isinstance(previous, dict):
+            raise ValueError("De opgeslagen maandregimes zijn beschadigd; laat dit onderzoeken.")
+        overrides = deepcopy(previous)
+        if regime is None:
+            overrides.pop(employee_id, None)
+        else:
+            # Alleen het geselecteerde regime valideren; oude afwijkende
+            # activiteiten en andere maandinvoer worden niet gewijzigd.
+            issues = validate_month_regimes({
+                "employees": [{"id": employee_id}],
+                "month_hour_regimes_v027": {employee_id: regime},
+            })
+            if issues:
+                raise ValueError(" ".join(issues))
+            overrides[employee_id] = deepcopy(regime)
+        updated["month_hour_regimes_v027"] = overrides
+        row.payload = updated
+        row.revision += 1
+        _audit(s, actor, f"{year}-{month:02d}: maandregime {employee_id} "
+               + ("teruggezet" if regime is None else "aangepast") + " (v0.27.2)")
+        return row.revision
+
+
 def save_month_shift(engine, year: int, month: int, expected_revision: int,
                      actor: str, entry: dict, original_id: str | None = None) -> int:
     """Bewaar uitsluitend een maanddienst, ook bij bestaande legacy-activiteiten.

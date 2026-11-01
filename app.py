@@ -45,7 +45,7 @@ from activity_move_v0263 import activity_destination, validate_movable_activity
 from hours_v027 import (validate_month_regimes, apply_month_regimes,
                          build_balance_preview, apply_balance_to_solver)
 
-st.set_page_config(page_title="Controleursplanning | v0.27.1", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.27.2", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -206,6 +206,37 @@ def replace_data(updated: dict) -> None:
     st.session_state.project_data = updated
     st.session_state.pop("last_plan", None)
     st.session_state.pop("alternatives_v09", None)
+
+
+
+def save_month_regime_and_rerun(employee_id: str, regime: dict | None) -> None:
+    """Sla uitsluitend één maandregime op, niet het volledige oude werkblad."""
+    current = clone()
+    tentative = {"employees": [{"id": employee_id}],
+                 "month_hour_regimes_v027": ({employee_id: regime} if regime is not None else {})}
+    issues = validate_month_regimes(tentative)
+    if issues:
+        raise ValueError(" ".join(issues))
+    if PERSISTENT:
+        rev = store.save_month_regime_v0272(
+            engine, int(current["year"]), int(current["month"]),
+            int(st.session_state.workspace_revision), current_user["employee_id"],
+            employee_id, regime,
+        )
+        refreshed, fresh_rev = store.load_month_workspace(
+            engine, int(current["year"]), int(current["month"]))
+        st.session_state.workspace_revision = fresh_rev
+        st.session_state.project_data = refreshed
+    else:
+        values = current.setdefault("month_hour_regimes_v027", {})
+        if regime is None:
+            values.pop(employee_id, None)
+        else:
+            values[employee_id] = regime
+        st.session_state.project_data = current
+    st.session_state.pop("last_plan", None)
+    st.session_state.pop("alternatives_v09", None)
+    st.rerun()
 
 
 def replace_and_rerun(updated: dict) -> None:
@@ -1341,7 +1372,7 @@ elif screen == "Planningsregels":
     st.info("Individuele uitzonderingen stel je in bij **Controleurs → Profiel en beperkingen**. Per categorie geldt de strengste maximumreeks.")
 
 elif screen == "Urenbalans":
-    st.subheader("🧮 Urenbalans en individuele maandregimes (v0.27)")
+    st.subheader("🧮 Urenbalans en individuele maandregimes (v0.27.2)")
     st.warning("Uitsluitend indicatieve TESTUREN: geen officiële registratie van overuren, "
                "verlof, loon of arbeidsrechten. Controleer het startsaldo altijd zelf.")
     st.caption("Een maandregeling is onafhankelijk van de gedeelde controleurscatalogus en "
@@ -1389,15 +1420,13 @@ elif screen == "Urenbalans":
                 if target_h > max_h:
                     st.error("De streefuren mogen niet boven het maandmaximum liggen.")
                 else:
-                    revised = clone()
-                    revised.setdefault("month_hour_regimes_v027", {})[eid] = {
-                        "target_month_hours": float(target_h), "max_month_hours": float(max_h)}
-                    replace_and_rerun(revised)
+                    save_month_regime_and_rerun(eid, {
+                        "target_month_hours": float(target_h),
+                        "max_month_hours": float(max_h),
+                    })
             if eid in data.get("month_hour_regimes_v027", {}):
                 if st.button("Persoonlijk maandregime terugzetten naar standaard", key="reset_regime_v027"):
-                    revised = clone()
-                    revised["month_hour_regimes_v027"].pop(eid, None)
-                    replace_and_rerun(revised)
+                    save_month_regime_and_rerun(eid, None)
     except (ValueError, store.ConflictError) as error:
         st.error(f"Urenbalans niet beschikbaar: {error}")
     except Exception:

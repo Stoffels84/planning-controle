@@ -1,3 +1,35 @@
+# Controleursplanning v0.27.2 — maandregime opslaan zonder foutieve oude maandinvoer te wijzigen
+
+**Gerichte herstelupdate voor v0.27.1.** Bij het opslaan van bijvoorbeeld 160 maximale planuren en 154 streefuren kreeg de gebruiker een groot aantal meldingen over `L301`, `V102` en een onbekende activiteit. De oorzaak was `replace_data`: die valideerde onbedoeld de **volledige** maand, hoewel alleen de urenregeling werd aangepast.
+
+## Correctie
+
+- De knop **Maandregime bewaren** en **Terugzetten naar standaard** gebruiken voortaan een **afzonderlijke server-side transactie** `save_month_regime_v0272` in `store.py`.
+- Er mag uitsluitend één urenregime van de gekozen, bestaande controleur veranderen. **Dienstencatalogus, maandbehoefte, activiteiten, voorkeuren en goedgekeurd verlof blijven onaangeroerd**.
+- De server controleert de rol van de gebruiker, de bestaande controleur, het toegestane aantal uren en de **maandrevisie** (bescherming tegen gelijktijdige wijzigingen). Elke geldige wijziging verhoogt de revisie en wordt geaudit; oude concepten mogen niet stilzwijgend gepubliceerd worden.
+- De algemene gegevensvalidatie blijft verplicht bij het **berekenen** van een planning. Deze fix lost de achtergebleven bezettingsfouten en afwijkende activiteit **niet automatisch** op; ze verdwijnen dus ook niet ongemerkt.
+- Geen nieuwe tabellen of databasewijzigingen en geen aanpassing aan Streamlit Secrets.
+
+## Kleine update vanaf v0.27.1
+
+1. Maak vooraf een databaseback-up en bewaar de huidige werkende GitHub-commit.
+2. Vervang in de hoofdmap van je repository **`app.py` en `store.py`** door de bestanden uit de update.
+3. Voeg voor de automatische controles **`tests/test_v0272_month_regime_save.py`** toe onder de bestaande map `tests/`.
+4. Klik op **Commit changes**, heropen Streamlit en controleer dat GitHub Actions groen wordt.
+
+## Functionele test
+
+1. Kies dezelfde *niet-gepubliceerde* maand waarin de fout voorkwam, open **Urenbalans**, selecteer *Testcontroleur 01*, voer **160** maximale planuren en **154** streefuren in en klik **Maandregime bewaren**.
+2. Herlaad de pagina. Beide waarden moeten behouden blijven en er mag **geen foutmelding over L301, V102 of activiteiten** verschijnen bij deze opslagactie.
+3. Controleer dat een andere maand zijn eigen ureninstellingen behoudt. Controleer eventueel ook de knop **Persoonlijk maandregime terugzetten naar standaard**.
+4. Controleer **GitHub Actions** voor de volledige OR-Tools-testreeks.
+
+**Lokaal getest:** 290 tests geslaagd; 12 tests overgeslagen wegens ontbrekende OR-Tools. De nieuwe Streamlit-weergave en GitHub Actions moeten nog op jouw omgeving gecontroleerd worden.
+
+**Let op:** voor het opnieuw berekenen van een maand moeten de reeds bestaande **bezettingsafwijkingen van L301 en V102** en eventuele ongeldige activiteiten nog apart hersteld worden. Gebruik deze update niet om veiligheidscontroles te omzeilen.
+
+---
+
 # Controleursplanning v0.27.1 — correctie Urenbalans
 
 **Kleine herstelupdate boven op v0.27.** Het scherm **Urenbalans** kon vastlopen op oudere/fictieve controleursprofielen zonder het veld `target_month_hours`. Dat bleek direct reproduceerbaar met de bestaande demonstratiegegevens: bij het tonen van de streefuren ontstond een `KeyError`. De UI leest de waarden nu via `catalog.profile(...)`, dat ontbrekende velden in het geheugen aanvult met de bestaande standaardwaarde **0 streefuren**, zonder wijzigingen aan bestaande databaseprofielen.
