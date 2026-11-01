@@ -1,4 +1,41 @@
-# Controleursplanning v0.26 — dienstdefinities per maand
+# Controleursplanning v0.26.1 — herstel van afwijkende activiteiten
+
+> Gerichte herstelversie bovenop v0.26. De maandgebonden dienstdefinities blijven behouden.
+
+## Waarom deze correctie?
+
+Bij het opslaan van een wijziging aan diensturen controleert de app ook de andere gegevens van de actieve maand. Als oudere activiteiten verwijzen naar een onbekende controleur of een datum buiten die maand, verschijnt `Gegevens niet opgeslagen: Activiteit ...` — ook wanneer de diensturen zelf correct zijn. Het weigeren van inconsistente gegevens is terecht; het oorspronkelijke scherm liet echter niet toe om **meerdere** ongeldige activiteiten veilig in één bewerking op te lossen.
+
+## Nieuw in v0.26.1
+
+- **Diensten** toont nu een gerichte waarschuwing met verwijzing naar het herstelgedeelte.
+- In **Uren en activiteiten → Oude activiteiten controleren** zie je de precieze probleemregels (personeelsnummer, datum, uren, type en reden).
+- Download **eerst een JSON-back-up** van alle activiteiten. Controleer of activiteiten terecht bij een andere maand horen of gelinkt moeten worden aan een bestaande controleur.
+- Alleen na expliciete selectie én bevestiging kun je afwijkende activiteiten **samen** verwijderen. Er gebeurt niets automatisch.
+- De normale datasetvalidatie en de **databasebescherming voor goedgekeurd verlof** blijven actief. Het verwijderen van beschermd verlof wordt geweigerd. Gepubliceerde planningversies worden niet aangepast.
+- Wijzig je vervolgens een dienstuur, dan zou de blokkering verdwenen moeten zijn, op voorwaarde dat er geen andere ongeldige gegevens zijn.
+
+**Let op:** deze versie verwijdert of verplaatst geen registraties zonder jouw beslissing. We hebben niet kunnen vaststellen waarom jouw acht specifieke activiteiten een ongeldige verwijzing kregen. Verwijder ze niet als het om nog geldig goedgekeurd verlof gaat. Herstel eerst de controleurregistratie of controleer of de activiteit in de juiste maand thuishoort.
+
+## Installatie vanaf v0.26
+
+1. Maak een databaseback-up en bewaar je laatste werkende GitHub-commit.
+2. Voor een minimale update: **vervang `app.py` en voeg `activities_v0261.py` toe** op het hoogste niveau van de repository. Of upload het volledige ZIP-project.
+3. Bewaar dezelfde Streamlit Secrets en database. Er is **geen nieuwe databasetabel** nodig.
+4. Kies de getroffen maand. Open **Uren en activiteiten → Oude activiteiten controleren**, bewaar eerst het back-upbestand en inspecteer de acht registraties.
+5. Verwijder uitsluitend onjuiste of elders reeds geregistreerde activiteiten met de uitdrukkelijke bevestiging. Ga daarna naar **Diensten** en wijzig het uur.
+6. Controleer bij GitHub **Actions** of de volledige OR-Tools-testworkflow groen is.
+
+## Tests v0.26.1
+
+- **248 tests geslaagd, 12 overgeslagen** in de lokale omgeving; de overgeslagen solvertests vereisen OR-Tools en worden opnieuw via GitHub Actions gecontroleerd.
+- Extra regressietests controleren gerichte detectie, niet-destructieve selectie, database-opslag, en bescherming van goedgekeurd verlof.
+- De online Streamlit-interface moet nog in jouw app worden geverifieerd.
+
+---
+
+## Bestaande v0.26-functionaliteit
+
 
 > **Proefversie — alleen fictieve persoonsgegevens.** Geen juridische, cao- of privacyvalidatie voor gebruik met echte personeelsgegevens. Maak **vóór installatie een volledige PostgreSQL-back-up** en bewaar de vorige werkende GitHub-commit.
 

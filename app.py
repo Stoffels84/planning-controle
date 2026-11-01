@@ -39,8 +39,9 @@ from locks_v022 import assignment_key, reoptimization_diff
 from manual_v023 import compile_edits, edit_description, regular_assignments, MAX_EDITS
 from roster_v024 import week_windows, month_days, roster_grid, staffing_grid, workbook_bytes
 from validator_v025 import verify_plan
+from activities_v0261 import invalid_activities, remove_invalid_activities
 
-st.set_page_config(page_title="Controleursplanning | v0.26", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.26.1", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -827,7 +828,11 @@ elif screen == "Controleurs":
                 replace_and_rerun(state)
 
 elif screen == "Diensten":
-    st.subheader("Dienstencatalogus per maand (v0.26)")
+    st.subheader("Dienstencatalogus per maand (v0.26.1)")
+    if invalid_activities(data):
+        st.warning(f"Er zijn {len(invalid_activities(data))} activiteiten met een onbekende controleur "
+                   "of een datum buiten de actieve maand. Daardoor wordt elke gegevenswijziging geblokkeerd. "
+                   "Controleer ze eerst bij **Uren en activiteiten → Oude activiteiten controleren**.")
     st.info(f"Je bewerkt uitsluitend de diensten voor **{data['month']:02d}/{data['year']}**. "
             "Andere al aangemaakte maanden behouden hun eigen diensturen, categorieën en bezetting. "
             "Nieuwe maanden nemen de dienstdefinities van de meest recente voorafgaande maand over.")
@@ -1077,6 +1082,48 @@ elif screen == "Voorkeuren":
 
 elif screen == "Uren en activiteiten":
     st.subheader("Testregistratie van afwezigheden en bijzondere opdrachten")
+    invalid = invalid_activities(data)
+    if invalid:
+        st.error(f"Er staan {len(invalid)} afwijkende activiteiten in deze maand. "
+                 "Hierdoor kunnen wijzigingen, ook aan diensturen, niet worden opgeslagen.")
+        with st.expander("Oude activiteiten controleren (v0.26.1)", expanded=True):
+            st.caption("Bekijk eerst de controleur, datum en reden. Controleer of er goedgekeurd verlof "
+                       "tussen staat. Verwijderen gebeurt nooit automatisch en wijzigt geen gepubliceerde planning.")
+            st.dataframe(pd.DataFrame([{
+                "Rij": r["index"] + 1, "Personeelsnr": r["employee_id"],
+                "Datum": r["date"], "Type": r["type"], "Uren": r["hours"],
+                "Probleem": r["reason"]
+            } for r in invalid]), hide_index=True, use_container_width=True)
+            st.download_button(
+                "⬇️ Back-up van alle activiteiten van deze maand (JSON)",
+                data=json.dumps(data.get("hour_credits", []), ensure_ascii=False, indent=2).encode("utf-8"),
+                file_name=f"activiteiten_backup_{data['year']}_{data['month']:02d}.json",
+                mime="application/json", key="download_invalid_activities_v0261")
+            with st.form("clean_invalid_activities_v0261"):
+                selected_invalid = st.multiselect(
+                    "Afwijkende activiteiten die je wilt verwijderen",
+                    [r["index"] for r in invalid],
+                    format_func=lambda idx: next(
+                        f"Rij {r['index'] + 1}: {r['employee_id']} — {r['date']} ({r['reason']})"
+                        for r in invalid if r["index"] == idx))
+                confirmed = st.checkbox(
+                    "Ik heb de registraties nagekeken en een back-up bewaard. "
+                    "Ik begrijp dat verwijderen van activiteiten invloed kan hebben op de planning.")
+                clean_submitted = st.form_submit_button(
+                    "Geselecteerde afwijkende activiteiten verwijderen")
+            if clean_submitted:
+                if not confirmed:
+                    st.error("Bevestig eerst dat je de gegevens hebt gecontroleerd.")
+                else:
+                    try:
+                        corrected = remove_invalid_activities(clone(), selected_invalid)
+                        # Ook de database controleert nog op goedgekeurd verlof.
+                        replace_and_rerun(corrected)
+                    except ValueError as error:
+                        st.error(str(error))
+            st.info("Als een registratie wél geldig verlof betreft of bij een andere maand hoort, "
+                    "verwijder deze niet zonder na te gaan waar ze correct geregistreerd moet worden. "
+                    "Herstel zo nodig eerst de bijbehorende controleur of maandregistratie.")
     st.warning("Uren zijn planningscredits, geen officieel uren-/loon-/overurensaldo. "
                "Een registratie blokkeert de volledige betrokken kalenderdag voor reguliere diensten.")
     if data.get("hour_credits"):
