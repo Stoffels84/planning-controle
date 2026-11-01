@@ -686,6 +686,28 @@ def save_month_workspace(engine, payload: dict, expected_revision: int, actor: s
         return row.revision
 
 
+
+def save_month_shift(engine, year: int, month: int, expected_revision: int,
+                     actor: str, entry: dict, original_id: str | None = None) -> int:
+    """Bewaar uitsluitend een maanddienst, ook bij bestaande legacy-activiteiten.
+
+    Behoud alle overige maandgegevens exact zoals ze nu in PostgreSQL staan;
+    kan geen activiteiten, voorkeuren of verlof verwijderen. De server voert
+    dezelfde rechten-, revisie- en verlofcontroles uit als andere wijzigingen.
+    De volledige datasetvalidatie blijft verplicht vóór een nieuwe berekening.
+    """
+    from shift_edit_v0262 import apply_month_shift
+
+    current, revision = load_month_workspace(engine, year, month)
+    if revision != expected_revision:
+        raise ConflictError("De maandgegevens zijn elders aangepast. Vernieuw en probeer opnieuw.")
+    updated = apply_month_shift(current, entry, original_id)
+    # Belangrijk: GEEN generieke wijziging van meegezonden sessiegegevens.
+    # Alleen 'shifts' en de daarbij behorende vaste 'demand.required' kunnen
+    # verschillen van de pas opnieuw ingelezen databaseversie.
+    return save_month_workspace(engine, updated, expected_revision, actor,
+                                f"Maanddienst {entry['id']} aangepast (v0.26.2)")
+
 def _period_workspace(s, year: int, month: int):
     """v0.12 gebruikt een maandrij; legacy tests zonder migratie gebruiken Workspace."""
     row = s.get(MonthWorkspace, period_key(year, month))

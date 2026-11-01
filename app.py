@@ -40,8 +40,9 @@ from manual_v023 import compile_edits, edit_description, regular_assignments, MA
 from roster_v024 import week_windows, month_days, roster_grid, staffing_grid, workbook_bytes
 from validator_v025 import verify_plan
 from activities_v0261 import invalid_activities, remove_invalid_activities
+from shift_edit_v0262 import apply_month_shift
 
-st.set_page_config(page_title="Controleursplanning | v0.26.1", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.26.2", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -463,7 +464,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.26 • Dienstencatalogus per maand • Onafhankelijke roostercontrole • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.26.2 • Dienstencatalogus per maand • Onafhankelijke roostercontrole • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -828,11 +829,12 @@ elif screen == "Controleurs":
                 replace_and_rerun(state)
 
 elif screen == "Diensten":
-    st.subheader("Dienstencatalogus per maand (v0.26.1)")
+    st.subheader("Dienstencatalogus per maand (v0.26.2)")
     if invalid_activities(data):
         st.warning(f"Er zijn {len(invalid_activities(data))} activiteiten met een onbekende controleur "
-                   "of een datum buiten de actieve maand. Daardoor wordt elke gegevenswijziging geblokkeerd. "
-                   "Controleer ze eerst bij **Uren en activiteiten → Oude activiteiten controleren**.")
+                   "of een datum buiten de actieve maand. Diensturen wijzigen kan nu veilig zonder "
+                   "die activiteiten te wissen. Een nieuwe planning berekenen vereist wel herstel: "
+                   "**Uren en activiteiten → Oude activiteiten controleren**.")
     st.info(f"Je bewerkt uitsluitend de diensten voor **{data['month']:02d}/{data['year']}**. "
             "Andere al aangemaakte maanden behouden hun eigen diensturen, categorieën en bezetting. "
             "Nieuwe maanden nemen de dienstdefinities van de meest recente voorafgaande maand over.")
@@ -880,12 +882,22 @@ elif screen == "Diensten":
                 for issue in issues:
                     st.error(issue)
             else:
-                if sh:
-                    state["shifts"] = [dict(existing, **entry) if existing["id"] == selected else existing for existing in state["shifts"]]
-                    catalog.sync_required(state, selected, int(required))
-                else:
-                    state["shifts"].append(entry)
-                replace_and_rerun(state)
+                try:
+                    if PERSISTENT:
+                        # Beperk de mutatie server-side tot één dienst: bestaande
+                        # afwijkende activiteiten blijven ongewijzigd bewaard.
+                        store.save_month_shift(
+                            engine, int(data["year"]), int(data["month"]),
+                            st.session_state.workspace_revision, current_user["employee_id"],
+                            entry, selected if sh else None)
+                        st.session_state.pop("last_plan", None)
+                        st.session_state.pop("alternatives_v09", None)
+                        st.rerun()
+                    else:
+                        updated = apply_month_shift(state, entry, selected if sh else None)
+                        replace_and_rerun(updated)
+                except (ValueError, store.ConflictError) as error:
+                    st.error(str(error))
     st.info("Wijzigingen gelden alleen voor deze maand. Een gewijzigde bezetting past de behoefte "
             "in deze maand aan. Bestaande gepubliceerde versies blijven historisch bewaard; "
             "bereken een nieuw concept om deze maand met de nieuwe diensturen te plannen. "
