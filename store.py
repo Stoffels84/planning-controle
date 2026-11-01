@@ -829,6 +829,34 @@ def _assert_boundary_current(s, year: int, month: int, payload: dict) -> None:
                             "Bereken de planning opnieuw om de rustregels te controleren.")
 
 
+def _verify_marked_result_v025(s, data: dict, result: dict) -> None:
+    """Nieuw berekende v0.25-concepten nogmaals onafhankelijk controleren.
+
+    Bestaande historische planrecords zonder v0.25-kenmerk blijven leesbaar;
+    nieuwe webberekeningen krijgen het kenmerk vanuit app.py.
+    """
+    summary = result.get("summary") if isinstance(result, dict) else None
+    if not isinstance(summary, dict) or "validation_v025" not in summary:
+        return
+    from boundary_v015 import adjacent_months
+    from validator_v025 import verify_plan
+    adjacent = adjacent_months(int(data["year"]), int(data["month"]))
+    rows = []
+    for side, (year, month) in adjacent.items():
+        published = _current_published(s, year, month)
+        if published is None:
+            continue
+        for r in published.payload.get("assignments", []):
+            rows.append({"employee_id": str(r["Personeelsnr"]),
+                         "date": str(r["Datum"]), "start": str(r["Begin"]),
+                         "end": str(r["Einde"]), "category": str(r["Categorie"]),
+                         "source": side})
+    check = verify_plan(data, result, rows)
+    if not check["passed"]:
+        raise ValueError("Onafhankelijke roostercontrole v0.25 mislukt: "
+                         + "; ".join(check["errors"][:5]))
+
+
 def save_plan(engine, data: dict, workspace_revision: int, result: dict, actor: str,
               expected_latest_plan_id: int | None = None) -> int:
     """Sla een concept op; v0.23 kan een inmiddels gewijzigde bronversie afwijzen."""
@@ -848,6 +876,7 @@ def save_plan(engine, data: dict, workspace_revision: int, result: dict, actor: 
                 raise ConflictError("Er is intussen een nieuwere planversie gemaakt. "
                                     "Ververs de pagina en controleer je handmatige wijzigingen opnieuw.")
         _assert_boundary_current(s, int(data["year"]), int(data["month"]), result)
+        _verify_marked_result_v025(s, w.payload, result)
         row = PlanningVersion(workspace_revision=workspace_revision, year=data["year"], month=data["month"],
                               author=actor, created_at=now(), payload=result)
         s.add(row)
@@ -947,6 +976,7 @@ def publish_plan(engine, plan_id: int, expected_revision: int, actor: str) -> No
         _assert_boundary_current(s, row.year, row.month, row.payload)
         if row.payload.get("status") not in ("OPTIMAL", "FEASIBLE"):
             raise ValueError("Er is geen geldige planning om te publiceren.")
+        _verify_marked_result_v025(s, w.payload, row.payload)
         earlier = _current_published(s, row.year, row.month)
         row.published_at = now()
         s.flush()

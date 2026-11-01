@@ -1,43 +1,67 @@
-# Controleursplanning v0.24.1 — rekentijd tot 60 minuten
+# Controleursplanning v0.25 — onafhankelijke basiscontrole
 
-> **Proefversie — uitsluitend fictieve gegevens.** Niet geschikt voor echte persoonsgegevens of operationele inzet zonder afzonderlijke validatie van beveiliging, privacy en arbeidsregels.
+> **Proefapplicatie, uitsluitend fictieve testgegevens.** Niet geschikt voor echte personeelsgegevens of de operationele planning bij De Lijn voordat de juridische, arbeidsrechtelijke, beveiligings- en privacycontrole volledig is uitgevoerd.
 
-## Wat is aangepast ten opzichte van v0.24?
+## Waarom deze release?
 
-In **Planning → Automatisch plannen met Google OR-Tools** had het invoerveld **Maximale rekentijd (seconden)** een bovengrens van **120 seconden**. Dat is nu **3.600 seconden (60 minuten)**. Deze waarde werd al geaccepteerd door de gegevensvalidatie en de gewone OR-Tools-planningsmotor; de wijziging zit in de gebruikersinterface.
+Tot en met v0.24.1 werden veel harde voorwaarden tijdens de OR-Tools-optimalisatie verwerkt, maar er was geen **afzonderlijke, solver-onafhankelijke eindcontrole** vóór het bewaren en publiceren van een rooster. Dezelfde rekenfout of corrupte roosterdata konden dan in een planversie terechtkomen.
 
-- Het veld laat **1–3.600 seconden** toe, met stapjes van 30 seconden. Je kunt een precieze waarde rechtstreeks intypen.
-- Nieuwe fictieve demogegevens beginnen met **300 seconden** als standaard. **Bestaande opgeslagen maanden en instellingen worden niet automatisch veranderd**: pas de waarde aan en klik **Instellingen opslaan**.
-- Bij een lange rekentijd verschijnt een toelichting: **laat het browsertabblad geopend**. Streamlit Community Cloud biedt in deze app **geen gegarandeerde achtergrondberekening** als de sessie verdwijnt of de server herstart.
-- De speciale solvercontrole voor dienstwissels behoudt de bestaande limiet van 15 seconden en wordt bewust niet gewijzigd.
-- Er zijn **geen wijzigingen** aan database, accounts, meldingen, verlof, handmatige roosterbewerking, planversies of de solverlogica.
+**v0.25 is de eerste validatiefase, niet de afsluiting van alle oorspronkelijke basisvoorwaarden.** De bestaande planningsmotor, handmatige roosterbewerking en databaseopbouw blijven behouden.
 
-## Installatie als je v0.24 gebruikt
+## Nieuw
 
-1. Bewaar je huidige GitHub-commit als herstelpunt; maak bij voorkeur een databaseback-up.
-2. Vervang in je GitHub-repository **`app.py`** door het meegeleverde bestand. Dit is voldoende om de 120-secondenlimiet weg te nemen.
-3. Vervang optioneel ook **`demo_data.py`** als je wilt dat *nieuwe fictieve demo-maanden* standaard 300 seconden krijgen in plaats van 10 seconden. Bestaande maanden blijven ongewijzigd.
-4. Commit en herlaad je Streamlit-app. Wijzig je bestaande PostgreSQL-database en Streamlit Secrets niet.
+- `validator_v025.py` controleert toegewezen diensten **zonder OR-Tools** op:
+  - actieve/bestaande controleurs, geldige dienstnummers en datum binnen de maand;
+  - meerdere diensten op dezelfde startdatum, dubbele toewijzingen en reguliere dienstbezetting;
+  - harde onbeschikbaarheid, rustdagen, geregistreerde dagafwezigheden, verboden diensten/categorieën/weekdagen en beschermde weekends;
+  - minimale rust tussen diensten, ook nachtdiensten die over middernacht of maandgrenzen lopen;
+  - verboden overgangen tussen dienstcategorieën;
+  - maximum aaneengesloten werkdagen en maximum categorie-reeksen, ook over een gekende maandgrens;
+  - individuele maandurenlimiet, aantal weekenddagen, gewerkte weekends en maxima per dienstcategorie;
+  - overeenstemming tussen diensttoewijzingen, openstaande plaatsen, maandbehoefte en samenvattende cijfers.
+- Bij elke nieuwe automatische berekening en handmatige heroptimalisatie voert de app deze nacontrole uit **vóór het concept wordt opgeslagen**. Een vastgestelde overtreding leidt tot een duidelijke fout en het onveilige resultaat wordt niet bewaard.
+- Onder **Planning → Onafhankelijke roostercontrole (v0.25)** toont de app de controle-uitkomst, ook bij oudere concepten. Een afgekeurd concept kan niet via de gebruikersinterface worden gepubliceerd.
+- Nieuwe concepten krijgen een `validation_v025`-kenmerk. De database voert de onafhankelijke controle **opnieuw** uit bij hun opslag en vóór hun publicatie, ter beveiliging tegen gewijzigde roosterdata. Oude historische versies zonder dit kenmerk blijven leesbaar; bij publicatie vanuit de app worden ze wel zichtbaar beoordeeld.
+- Nieuw GitHub Actions-bestand `.github/workflows/tests.yml` om na upload alle tests **inclusief OR-Tools** met Python 3.11 te draaien. De uitslag op GitHub moet nog gecontroleerd worden. Het GitHub-project heeft geen nieuwe Secrets nodig voor deze tests.
 
-Het ZIP-pakket bevat het **volledige project**, voor wie liever alle bestanden samen bijwerkt.
+## Installeren over de werkende v0.24.1
 
-## Testprocedure
+1. Maak eerst een **PostgreSQL-back-up** en bewaar de vorige GitHub-commit als herstelpunt.
+2. Download het volledige v0.25 ZIP-pakket, pak het lokaal uit en vervang/upload de projectbestanden op GitHub. Controleer vooral **`app.py`**, **`store.py`**, het nieuwe **`validator_v025.py`** en de nieuwe tests.
+3. Upload ook `.github/workflows/tests.yml` als je automatische tests op GitHub wilt; verborgen mappen zijn niet altijd zichtbaar in de bestandskiezer.
+4. Klik op **Commit changes**, laat Streamlit opnieuw starten en open **Planning**.
+5. Kijk in je GitHub-repository bij het tabblad **Actions** of de testworkflow groen is. Bij fouten: open de tests en meld de exacte foutregels. GitHub Actions moet in je repository toegelaten zijn.
 
-1. Open als beheerder **Planning** en kijk bij **Maximale rekentijd (seconden)**.
-2. Voer **300**, **600** of **1.800** in, klik **Instellingen opslaan**, en herlaad het scherm.
-3. Controleer of je gekozen getal bewaard blijft.
-4. Voer met fictieve gegevens een planning uit met langere rekentijd en vergelijk de bezetting met de eerdere 120-secondenberekening.
-5. Hou je browsertabblad open tijdens het rekenen. Een langere ingestelde rekentijd is een **bovengrens**, geen garantie dat de berekening zo lang loopt of altijd beter wordt.
+**Geen databasewijzigingen, nieuwe wachtwoorden of aanpassingen aan Streamlit Secrets nodig.** Bestaande gepubliceerde planningen worden niet automatisch gewijzigd.
 
-## Tests
+## Testscenario's in Streamlit
+
+1. Bereken met fictieve controleurs een maand. Controleer dat **Onafhankelijke roostercontrole (v0.25)** de toewijzingen telt en geen overtredingen meldt.
+2. Maak een gedeeltelijk gevuld plan. Controleer dat toegewezen, benodigde en open plaatsen met elkaar overeenkomen.
+3. Maak een concept met een manuele wijziging en controleer dat de nacontrole ook voor die versie wordt uitgevoerd.
+4. Test een fictieve nachtdienst aan het einde van een maand en een vroege dienst aan het begin van de volgende **nadat de buurmaand is gepubliceerd**; de rustregels moeten gerespecteerd worden.
+5. Ga naar GitHub **Actions** en controleer de testuitslag met echte OR-Tools. Onze lokale omgeving heeft deze bibliotheek niet.
+
+## Technische tests
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt pytest
 pytest -q
 ```
 
-Bij het samenstellen van deze release: **222 tests geslaagd, 11 overgeslagen** (OR-Tools niet geïnstalleerd in de testomgeving). De Streamlit-interface en de solver met hoge limiet moeten nog in jouw online omgeving worden gecontroleerd. Nieuwe regressietests: `tests/test_v0241_solver_timeout_setting.py`.
+Bij het maken van deze versie: **231 tests geslaagd, 11 modules overgeslagen** wegens ontbrekende OR-Tools; syntaxcontrole en ZIP-integriteit afzonderlijk geverifieerd. De Streamlit-gebruikersinterface en GitHub Actions zijn nog niet online getest.
 
-## Verder
+## Nog niet afgevinkt / belangrijk
 
-Alle functionaliteit van v0.24 blijft aanwezig. Er is **geen achtergrondtaak of autosave** toegevoegd: de gebruiker moet de applicatie openhouden tijdens een lange berekening en vervolgens het resultaat volgens het bestaande proces bewaren/publiceren.
+- De testomgeving levert **geen attest van wettelijke conformiteit**. Arbeidsregels van De Lijn, CAO, verplaatsingstijd en uitzonderingen moeten nog expliciet gevalideerd worden.
+- De huidige dienstencatalogus blijft globaal, niet per afzonderlijke periode.
+- Automatische uur-/saldotransfers en de volledige individuele arbeidsregimes zijn nog niet uitgewerkt.
+- Uitgebreide weekendrotaties, voorkeurquota, invoerperiodes, taakverdelingsregels en locatiegebonden reistijden ontbreken nog of zijn slechts gedeeltelijk geïmplementeerd.
+- De onafhankelijke controle beoordeelt in deze fase **reguliere diensten en de basiswerkregels**. De volledige semantiek van ingebedde/vrijgestelde taakplaatsen en de rechtmatigheid van alle taaktoewijzingen is nog een volgende validatiefase.
+- Een **niet-gepubliceerde** buurmaand kan per definitie nog niet meegenomen worden in grenscontrole. Na publicatie van een buurmaand kan herberekening nodig zijn.
+- De solver kan binnen de rekentijd een **FEASIBLE** (niet bewezen optimale) oplossing vinden. Een geslaagde nacontrole bevestigt alleen de geïmplementeerde harde basisregels, niet dat het de best mogelijke bezetting is.
+- Achtergrondberekeningen en automatische toekomstige publicatie worden niet toegevoegd in v0.25.
+
+## Vervolg
+
+Na bevestiging van de UI en een groene GitHub Actions-run zijn de volgende prioriteiten: onafhankelijk toetsen van de **taak-/kwalificatieregels**, per-periode dienstcatalogi en de ontbrekende uur-/weekend-/voorkeurenspecificaties.

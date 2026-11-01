@@ -38,8 +38,9 @@ from diagnostics_v021 import analyze_month, explain_open_positions
 from locks_v022 import assignment_key, reoptimization_diff
 from manual_v023 import compile_edits, edit_description, regular_assignments, MAX_EDITS
 from roster_v024 import week_windows, month_days, roster_grid, staffing_grid, workbook_bytes
+from validator_v025 import verify_plan
 
-st.set_page_config(page_title="Controleursplanning | v0.24.1", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.25", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -1454,7 +1455,15 @@ elif screen == "Planning":
             with st.spinner("OR-Tools zoekt een zo goed mogelijke planning…"):
                 calculation_data = apply_published_history(data, historic) if auto_history else data
                 calculation_data = with_boundary_context(calculation_data, boundary_context)
-                st.session_state.last_plan = solve_month(calculation_data)
+                candidate = solve_month(calculation_data)
+                if candidate.status in ("OPTIMAL", "FEASIBLE"):
+                    check = verify_plan(data, asdict(candidate), boundary_context["assignments"])
+                    if not check["passed"]:
+                        raise ValueError("Onafhankelijke roostercontrole v0.25 afgekeurd: "
+                                         + "; ".join(check["errors"][:5])
+                                         + ". De onveilige berekening wordt niet opgeslagen.")
+                    candidate.summary["validation_v025"] = check
+                st.session_state.last_plan = candidate
                 st.session_state.last_plan.summary.update({"boundary_sources": boundary_context["sources"],
                                                            "history_months": len(past_plans),
                                                            "history_lookback": months_back if auto_history else 0})
@@ -1479,6 +1488,28 @@ elif screen == "Planning":
             st.warning("De aangrenzende gepubliceerde maanden zijn gewijzigd of deze planning "
                        "is nog zonder maandgrenscontrole berekend. Bereken opnieuw vóór publicatie.")
         st.markdown(f"#### Resultaat: {plan.status}")
+        # Onafhankelijke controle op ALLE geldige resultaten, ook oudere concepten.
+        # Dit is een extra veiligheidsbarrière naast de CP-SAT-planningsregels.
+        audit = None
+        if plan.status in ("OPTIMAL", "FEASIBLE"):
+            try:
+                audit = verify_plan(data, asdict(plan), boundary_context["assignments"])
+                with st.expander("🛡️ Onafhankelijke roostercontrole (v0.25)", expanded=not audit["passed"]):
+                    if audit["passed"]:
+                        st.success(f"Geen overtredingen aangetroffen in {audit['assignments_checked']} "
+                                   "toewijzingen voor de gecontroleerde basisregels.")
+                    else:
+                        st.error(f"{len(audit['errors'])} overtreding(en) gevonden: dit rooster "
+                                 "mag niet gepubliceerd worden.")
+                        for text in audit["errors"][:30]:
+                            st.write("• " + text)
+                    st.caption("Dit is een softwarecontrole van de ingestelde proefregels, "
+                               "geen wettelijke of CAO-validatie. Een ontbrekende aangrenzende "
+                               "gepubliceerde maand kan niet mee gecontroleerd worden.")
+            except (ValueError, KeyError, TypeError) as error:
+                audit = {"passed": False, "errors": [str(error)]}
+                st.error("De onafhankelijke roostercontrole is mislukt; publicatie is geblokkeerd. "
+                         + str(error))
         if plan_record:
             st.caption(f"Versie #{plan_record['id']} • {'Gepubliceerd' if plan_record['published'] else 'Concept'} • Opgesteld door {plan_record['author']}")
             if not plan_record["published"] and plan_record["revision"] == st.session_state.workspace_revision:
@@ -1498,7 +1529,7 @@ elif screen == "Planning":
                                    "alleen meldingen in de webapp.")
                         confirmed = st.checkbox("Ik heb de maandplanning gecontroleerd en wil deze versie publiceren.",
                                                 key=f"publish_confirm_v018_{plan_record['id']}")
-                        if st.button("✅ Publiceer deze testplanning", disabled=not confirmed,
+                        if st.button("✅ Publiceer deze testplanning", disabled=not confirmed or not (audit and audit["passed"]),
                                      key=f"publish_v018_{plan_record['id']}"):
                             try:
                                 store.publish_plan(engine, plan_record["id"], st.session_state.workspace_revision,
@@ -1640,6 +1671,11 @@ elif screen == "Planning":
                                     actual_keys = {assignment_key(r) for r in regular_assignments(new_plan.assignments)}
                                     if any(assignment_key(r) in actual_keys for r in compiled["excluded"]):
                                         raise ValueError("Een verwijderde dienst is toch teruggekeerd.")
+                                    check = verify_plan(data, asdict(new_plan), boundary_context["assignments"])
+                                    if not check["passed"]:
+                                        raise ValueError("De onafhankelijke roostercontrole is mislukt: "
+                                                         + "; ".join(check["errors"][:5]))
+                                    new_plan.summary["validation_v025"] = check
                                     new_plan.summary.update({
                                         "boundary_sources": boundary_context["sources"],
                                         "history_months": len(past_plans),
