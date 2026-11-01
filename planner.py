@@ -25,6 +25,7 @@ from tasks_v07 import task_bounds, validate_tasks, need_mode, standalone_code, s
 from optimization_v09 import validate_profiles
 from boundary_v015 import validate_boundary_rows
 from locks_v022 import assignment_key, validate_locks
+from manual_v023 import _validated_single
 
 
 @dataclass
@@ -103,13 +104,22 @@ def validate_dataset(data: dict) -> list[str]:
 
 
 def solve_month(data: dict, fixed_plan: dict | None = None,
-                locked_assignments: list[dict] | None = None) -> PlanResult:
+                locked_assignments: list[dict] | None = None,
+                excluded_assignments: list[dict] | None = None) -> PlanResult:
     errors = validate_dataset(data)
     if errors:
         raise ValueError("\n".join(errors))
-    if fixed_plan is not None and locked_assignments is not None:
+    if fixed_plan is not None and (locked_assignments is not None or excluded_assignments is not None):
         raise ValueError("Volledige ruilverificatie en gedeeltelijke vergrendeling mogen niet worden gecombineerd.")
     locked = validate_locks(data, locked_assignments or [])
+    excluded = excluded_assignments or []
+    if not isinstance(excluded, list) or len(excluded) > 500:
+        raise ValueError("Er zijn te veel uitgesloten diensten.")
+    excluded = [_validated_single(data, row) for row in excluded]
+    if len({assignment_key(r) for r in excluded}) != len(excluded):
+        raise ValueError("Dubbel uitgesloten diensttoewijzing.")
+    if {assignment_key(r) for r in excluded} & {assignment_key(r) for r in locked}:
+        raise ValueError("Een dienst kan niet tegelijk vastgezet en uitgesloten zijn.")
 
     employees = [profile(e) for e in data["employees"] if e.get("active", True)]
     shifts = {s["id"]: s for s in data["shifts"]}
@@ -552,6 +562,18 @@ def solve_month(data: dict, fixed_plan: dict | None = None,
             raise ValueError(f"Vaste dienst {sid} op {d} voor {eid} is niet inzetbaar volgens de huidige individuele regels.")
         for key in requested:
             model.add(possible[key] == 1)
+
+    # v0.23 — een handmatig verwijderde toewijzing mag niet terugkomen.
+    # De dienstplaats zelf blijft beschikbaar voor andere controleurs.
+    if excluded:
+        possible_exclusions = {(str(req["date"]), str(req["shift_id"]), emp["id"]): var
+                               for (ei, ri), var in x.items()
+                               for req, emp in ((slots[ri], employees[ei]),)
+                               if "_task_index" not in req}
+        for row in excluded:
+            var = possible_exclusions.get(assignment_key(row))
+            if var is not None:
+                model.add(var == 0)
 
     # v0.11: controleer ruilen door het HELE gepubliceerde rooster vast te pinnen.
     # Dit gebruikt exact dezelfde harde constraints als de maandplanning.

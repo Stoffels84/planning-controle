@@ -1,61 +1,71 @@
-# Controleursplanning v0.22 — gericht heroptimaliseren met vaste diensten
+# Controleursplanning v0.23 — handmatige roosterbewerking
 
-> **Testversie met uitsluitend fictieve gegevens.** Niet vrijgegeven voor operationele beslissingen of echte personeelsgegevens. De arbeidsregels en beveiliging vereisen afzonderlijke beoordeling voor productiegebruik.
+> **Proefversie met uitsluitend fictieve gegevens.** Niet geschikt voor echte personeelsgegevens of operationele planningsbeslissingen zonder aparte veiligheids-, privacy- en arbeidsrechtelijke validatie.
 
-## Nieuw in v0.22
+## Nieuw in versie 0.23
 
-Onder **Planning** staat bij een bestaand berekend rooster een extra onderdeel:
-**🔒 Diensten vastzetten en overige heroptimaliseren (v0.22)**.
+Onder **Planning → ✏️ Handmatige roosterbewerking (v0.23)** kun je een lijst met wijzigingen maken **voordat** je de planner één keer laat herberekenen.
 
-- Kies in de tabel met bestaande toewijzingen via de kolom **Vastzetten** welke combinatie van **datum, dienstnummer en controleur** beslist behouden moet blijven.
-- Optioneel kun je **één extra dienst handmatig vastzetten**. Kies hiervoor een datum/dienstnummer uit de actuele maandbehoefte en een actieve controleur. Na elke berekening kun je op basis van het nieuwe resultaat desgewenst nog een extra dienst vastzetten.
-- De Google OR-Tools-solver houdt alle vastgezette toewijzingen **hard** aan en herberekent de **niet-vastgezette** diensten. Ook de andere harde regels blijven verplicht: rust, individuele onbeschikbaarheid, maxima, afwezigheden, taken en gepubliceerde aangrenzende maanden.
-- Het resultaat wordt opgeslagen als een **nieuw concept**. De bronversie, en zeker een eventuele gepubliceerde planning, wordt **niet overschreven**. Publiceren blijft een afzonderlijke actie met bevestiging.
-- In de resultaten staat een vergelijking met de vorige versie: het aantal vastgezette, behouden, nieuwe en weggevallen reguliere diensttoewijzingen.
-- Als de keuze niet mogelijk is of de solver binnen de rekentijd geen geldige planning vindt, **wordt geen nieuw concept opgeslagen**.
+| Bewerking | Wat gebeurt er? |
+|---|---|
+| **Dienst toevoegen** | Kies datum en dienstnummer uit de actuele maandbehoefte en wijs een actieve controleur toe. Die nieuwe toewijzing moet behouden blijven in het nieuwe concept. |
+| **Dienst vervangen** | Kies een bestaande toewijzing en een andere controleur. De oude combinatie wordt verboden; de nieuwe wordt verplicht. |
+| **Dienst verwijderen** | Verwijder de bestaande combinatie van controleur, datum en dienst. Die combinatie mag niet automatisch terugkomen. **De dienstplaats blijft wel bestaan** en kan dus aan iemand anders worden toegewezen. |
+| **Bestaande dienst behouden** | Verplicht dat een bestaande toewijzing in de nieuwe planning blijft staan. |
 
-**Bewuste beperkingen:** zelfstandige taken kunnen niet direct individueel vastgezet worden; hun toewijzing wordt opnieuw door de solver bepaald. De huidige interface ondersteunt één bijkomende handmatige toewijzing per herberekening. Er is geen voorziening om gepubliceerde plannen rechtstreeks in-place te wijzigen. Voor geheel opnieuw plannen zonder vaste diensten blijft de knop **Bereken maandplanning** bestaan.
+Je kunt **maximaal 150 wijzigingen** klaarzetten. Iedere wijziging verschijnt in een overzicht en kan afzonderlijk worden verwijderd. Je kunt ook de volledige bewerkingslijst wissen.
 
-### Wat controleert de app?
+### Behoud van bestaande diensten
 
-1. Elke vastgezette dienst bestaat in de maandbehoefte van de actieve maand.
-2. Het gekozen personeelsnummer hoort bij een actieve controleur.
-3. Geen dubbele vastzettingen, geen twee diensten op dezelfde dag voor dezelfde controleur, en niet meer reguliere vastzettingen dan de gewone dienstbezetting.
-4. De solver controleert of de gekozen personeels-/dienstcombinatie werkelijk inzetbaar is en of de totale planning aan alle harde regels voldoet.
-5. Concepten met een verouderde werkruimterevisie of gewijzigde aangrenzende gepubliceerde maand kunnen niet als basis voor gerichte heroptimalisatie gebruikt worden. Eerst opnieuw berekenen.
-6. Na berekening controleert de app dat **iedere vastgezette dienst daadwerkelijk in het resultaat staat**, voordat er een nieuw concept opgeslagen wordt.
+Standaard staat **Behoud alle andere bestaande reguliere toewijzingen** aan. Daardoor blijven ook de diensten die je niet aanpast, vastgezet. Als een wijziging daarmee botst (bv. de nieuwe controleur werkt al op een andere dienst op dezelfde dag), kun je de conflicterende toewijzing expliciet bewerken of de optie uitzetten. **Bij uitzetten mag de solver andere diensten herschikken.**
 
-## Installatie op GitHub + Streamlit
+De hele bewerkingslijst wordt **vóór het opslaan** gecontroleerd op dubbele en tegengestelde wijzigingen, geldige dienstnummers, actieve controleurs, dienstbezetting en dubbele werkdagen. Daarna past **dezelfde OR-Tools-planner** alle harde beperkingen toe, waaronder rusttijden, maxima, afwezigheden, dienstcategorieën, taakregels en de regels over aangrenzende gepubliceerde maanden. Er is **geen manier om via handmatig wijzigen een harde regel te omzeilen**.
 
-1. Maak eerst een back-up van je PostgreSQL-database en bewaar de **werkende v0.21 GitHub-commit** als herstelpunt.
-2. Pak `controleursplanning-github-streamlit-v022.zip` uit.
-3. Upload **alle bestanden** naar de root van dezelfde private GitHub-repository. **Nieuw:** `locks_v022.py`; **aangepast:** `app.py`, `planner.py` en `README.md`. De andere bestaande modules en tests worden volledig meegeleverd.
-4. Commit de wijzigingen en herstart/open de bestaande Streamlit Community Cloud-app.
-5. Laat `DATABASE_URL`, andere Streamlit Secrets en de bestaande PostgreSQL-database ongemoeid. **Er is geen databasemigratie en geen nieuwe tabel nodig.**
+Bij succes wordt het resultaat als **nieuwe conceptplanning** opgeslagen, nooit over de vorige versie of publicatie heen. Publiceren vergt een aparte bevestiging van de planner. Als de planning niet haalbaar is, blijft de vorige versie ongewijzigd. Ook wanneer een andere planner intussen een nieuwere planversie heeft opgeslagen, weigert de toepassing het resultaat op de verouderde versie te baseren.
 
-De huidige bestandsstructuur blijft `app.py` als Streamlit-hoofdscript, de maandplanning in PostgreSQL en de bestaande Google OR-Tools-berekening in `planner.py`.
+**Belangrijke beperkingen:**
 
-## Testprocedure op Streamlit
+- Alleen reguliere diensten uit de maandbehoefte kunnen handmatig worden bewerkt. Zelfstandige taken worden door de solver toegewezen.
+- **Verwijderen** betekent *dezelfde controleur niet opnieuw op deze dienst*. Het betekent niet *de dienstplaats bewust onbezet laten* en het verwijdert het dienstnummer niet uit de maandbehoefte.
+- De wachtrij met nog niet opgeslagen wijzigingen bestaat alleen in de huidige Streamlit-sessie. Vernieuw de browser niet voordat je klaar bent, want niet-toegepaste wijzigingen kunnen verloren gaan.
+- Behoud je alle bestaande diensten, dan kan de herberekening onhaalbaar worden. Zet de behoud-optie uit indien een grotere herschikking nodig is; controleer de verschillen daarna zorgvuldig.
+- De oude v0.22-functie **Diensten vastzetten en overige heroptimaliseren** blijft beschikbaar, maar voor meerdere bewerkingen gebruik je bij voorkeur v0.23.
+- Er wordt geen volledige handmatige vrije roostereditor gebruikt die arbeidsregels buiten de solver om kan wijzigen. Het definitieve rooster ontstaat steeds door een gecontroleerde herberekening.
 
-1. Meld je aan als fictieve beheerder/planner, selecteer een aangemaakte maand met diensten, en open **Planning**.
-2. Als er nog geen rooster bestaat, klik **Bereken maandplanning**. Noteer één of twee toegewezen medewerkers en hun diensten.
-3. Open **Diensten vastzetten en overige heroptimaliseren**. Vink bij een bestaande dienst **Vastzetten** aan. Klik op **Heroptimaliseer met vaste toewijzingen** en bevestig de handeling.
-4. Bekijk het **nieuwe concept**. De vastgezette combinatie van datum, dienstnummer en controleur moet exact gelijk zijn. Niet-vastgezette toewijzingen mogen gewijzigd zijn, maar hoeven niet noodzakelijk anders te worden.
-5. Probeer daarna een **extra manuele toewijzing** te kiezen en te heroptimaliseren. De solver kan hierdoor een andere controleur op een eerdere dienst zetten. Bij een tegenstrijdige combinatie moet de app weigeren, zonder vorige concepten te wijzigen.
-6. Als je met een **gepubliceerde versie** begon: controleer dat de eerdere publicatie in **Publicatiebeheer** en het persoonlijke portaal beschikbaar blijft, totdat je expliciet het nieuwe concept publiceert.
-7. Wijzig eventueel de maandbehoefte: een verouderde bronplanning moet nu eerst opnieuw berekend worden voordat je er vaste toewijzingen uit kunt overnemen.
+## Installeren op je bestaande GitHub- en Streamlit-app
 
-### Automatische tests
+1. Maak een **back-up van de PostgreSQL-database** en bewaar de werkende GitHub-commit van **v0.22** als herstelpunt.
+2. Pak `controleursplanning-github-streamlit-v023.zip` uit.
+3. Upload de **volledige inhoud** naar de root van je bestaande private GitHub-repository; overschrijf de bestanden uit de vorige versie. Voeg zeker het nieuwe bestand `manual_v023.py` toe. Ook `app.py`, `planner.py`, `store.py` en de tests zijn gewijzigd.
+4. Commit de wijziging en open de bestaande Streamlit Community Cloud-app opnieuw.
+5. **Laat je bestaande PostgreSQL-database, `DATABASE_URL` en andere Streamlit Secrets ongewijzigd.** Er zijn geen nieuwe tabellen of migraties nodig.
+
+## Testen in jouw Streamlit-app
+
+Test uitsluitend met fictieve controleurs en diensten.
+
+1. Meld je aan als beheerder of planner; open een bestaande maand met een berekende planning. Kies **Planning → Handmatige roosterbewerking (v0.23)**.
+2. **Vervangen:** kies een bestaande toewijzing, daarna een andere controleur en druk **Zet bewerking op de lijst**.
+3. **Toevoegen:** kies een datum/dienstnummer uit de maandbehoefte en een controleur. Zet ook deze bewerking klaar.
+4. **Verwijderen:** kies nog een oorspronkelijke toewijzing en zet de verwijdering klaar. Je moet nu drie wijzigingen in het overzicht zien.
+5. Controleer of je een afzonderlijke wijziging weer van de lijst kunt verwijderen en opnieuw kunt toevoegen.
+6. Laat **Behoud alle andere bestaande reguliere toewijzingen** ingeschakeld. Als de lijst een tegenstrijdigheid toont, corrigeer die. Je kunt voor een minder beperkte herberekening de behoud-optie uitzetten.
+7. Bevestig en klik **Controleer wijzigingen en maak nieuw concept**. Controleer dat alle vereiste toewijzingen behouden zijn, verboden oude combinaties niet terugkomen en andere diensten de harde regels respecteren.
+8. Controleer in **Publicatiebeheer** dat de bestaande gepubliceerde versie nog steeds intact is. Pas na een aparte bevestiging mag de nieuwe conceptversie gepubliceerd worden.
+9. Open het oude v0.22-onderdeel en bevestig dat de bestaande vergrendelingsfunctie nog beschikbaar is.
+10. Test een onmogelijke combinatie, bijvoorbeeld twee vastgezette diensten op één dag voor dezelfde persoon; de app moet weigeren **zonder nieuwe versie te bewaren**.
+
+## Automatische tests
 
 ```bash
 pip install -r requirements.txt
 pytest -q
 ```
 
-In de bestandsbouwomgeving: **179 tests geslaagd; 10 solver-/integratietestmodules overgeslagen** omdat Google OR-Tools daar niet geïnstalleerd kon worden. De nieuwe CP-SAT-tests zijn opgenomen in `tests/test_v022_solver.py`, maar moeten nog draaien in een omgeving met OR-Tools. De Streamlit-interactie moet nog in de echte testapp getest worden.
+Bij het samenstellen van dit pakket: **204 tests geslaagd; 11 testmodules overgeslagen**, omdat OR-Tools in de pakketomgeving niet beschikbaar is. De nieuwe integratietests voor `excluded_assignments` staan in `tests/test_v023_solver.py`; ze moeten nog uitgevoerd worden in de geïnstalleerde Streamlit-omgeving met OR-Tools. De nieuwe schermen zijn nog niet interactief in Streamlit getest.
 
-## Bestaande functies blijven behouden
+## Versie en compatibiliteit
 
-Onder andere: maandwerkruimtes, maandbehoefte kopiëren, individuele voorkeuren, verlofaanvragen en (gedeeltelijke) intrekking, diensten ruilen met goedkeuring, taken en kwalificaties, regels over maandgrenzen, meldingen in de webapp, publicatiebeheer, rapportage en eerlijkheidsanalyse, alternatieve optimalisatieprofielen, v0.21 haalbaarheidsdiagnose en Excel-export.
-
-**Belangrijk:** het vastzetten van één of meerdere diensten is geen vrijstelling van arbeidsregels. Een tegenstrijdige combinatie wordt afgekeurd of resulteert in een onhaalbaar planningsprobleem. Controleer resultaten altijd handmatig; deze toepassing is nog geen gevalideerd roostersysteem voor De Lijn.
+- Gebaseerd op de volledige **v0.22-broncode**; geen nieuw database- of Secrets-vereiste.
+- Nieuw: `manual_v023.py`; aangepast: `app.py`, `planner.py`, `store.py`; nieuw: tests `test_v023_manual.py`, `test_v023_solver.py`, `test_v023_persistence.py`.
+- Bestaande functionaliteit blijft behouden: maandwerkruimtes, maandbehoefte kopiëren, voorkeuren, verlof en gedeeltelijke intrekking, ruilen, taken, meldingen, publicatiebeheer, rapportage, diagnoses en Excel-export.

@@ -829,7 +829,9 @@ def _assert_boundary_current(s, year: int, month: int, payload: dict) -> None:
                             "Bereken de planning opnieuw om de rustregels te controleren.")
 
 
-def save_plan(engine, data: dict, workspace_revision: int, result: dict, actor: str) -> int:
+def save_plan(engine, data: dict, workspace_revision: int, result: dict, actor: str,
+              expected_latest_plan_id: int | None = None) -> int:
+    """Sla een concept op; v0.23 kan een inmiddels gewijzigde bronversie afwijzen."""
     with session_factory(engine).begin() as s:
         who = s.get(Account, actor)
         if who is None or who.role not in ("admin", "planner") or not who.active:
@@ -837,6 +839,14 @@ def save_plan(engine, data: dict, workspace_revision: int, result: dict, actor: 
         w = _period_workspace(s, int(data["year"]), int(data["month"]))
         if w is None or w.revision != workspace_revision:
             raise ConflictError("De invoergegevens zijn tijdens de berekening veranderd. Vernieuw en bereken opnieuw.")
+        if expected_latest_plan_id is not None:
+            latest_id = s.scalar(select(PlanningVersion.id).where(
+                PlanningVersion.year == data["year"],
+                PlanningVersion.month == data["month"]
+            ).order_by(PlanningVersion.id.desc()).limit(1))
+            if latest_id != expected_latest_plan_id:
+                raise ConflictError("Er is intussen een nieuwere planversie gemaakt. "
+                                    "Ververs de pagina en controleer je handmatige wijzigingen opnieuw.")
         _assert_boundary_current(s, int(data["year"]), int(data["month"]), result)
         row = PlanningVersion(workspace_revision=workspace_revision, year=data["year"], month=data["month"],
                               author=actor, created_at=now(), payload=result)

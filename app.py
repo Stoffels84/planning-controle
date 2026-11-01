@@ -36,8 +36,9 @@ from portal_v017 import month_tiles, personal_publication_changes, personal_requ
 from report_v019 import build_report, safe_excel_rows
 from diagnostics_v021 import analyze_month, explain_open_positions
 from locks_v022 import assignment_key, validate_locks, reoptimization_diff
+from manual_v023 import compile_edits, edit_description, regular_assignments, MAX_EDITS
 
-st.set_page_config(page_title="Controleursplanning | v0.22", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.23", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -459,7 +460,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.22 • Gerichte heroptimalisatie met vaste diensten • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.23 • Meerdere handmatige roosterwijzigingen in één keer • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -1404,11 +1405,169 @@ elif screen == "Planning":
                                 st.error(str(error))
                 except ValueError as error:
                     st.error(f"Publicatievoorbeeld niet beschikbaar: {error}")
+        # v0.23: meerdere handmatige wijzigingen samen bewaren in de SESSIE,
+        # pas na solvervalidatie atomair als nieuwe conceptversie opslaan.
+        if plan_record and PERSISTENT:
+            with st.expander("✏️ Handmatige roosterbewerking (v0.23)", expanded=True):
+                st.caption("Voeg meerdere wijzigingen toe aan een tijdelijke bewerkingslijst. "
+                           "Niets wordt opgeslagen of gepubliceerd vóór de controle met de planner. "
+                           "Een verwijderde toewijzing kan door een andere controleur worden ingevuld.")
+                if plan_record["published"]:
+                    st.info("Je vertrekt van een gepubliceerd rooster. Wijzigingen maken uitsluitend "
+                            "een nieuw concept; de publicatie blijft ongewijzigd.")
+                manual_current = plan_record["revision"] == st.session_state.workspace_revision
+                manual_boundary_ok = (plan.summary or {}).get("boundary_sources") == boundary_context["sources"]
+                if not manual_current or not manual_boundary_ok:
+                    st.warning("De invoer of een aangrenzende gepubliceerde maand is gewijzigd. "
+                               "Bereken eerst een nieuwe planning voordat je handmatig bewerkt.")
+                else:
+                    original_rows = regular_assignments(plan.assignments)
+                    original_keys = sorted({assignment_key(r) for r in original_rows})
+                    demand_slots = sorted({(r["date"], r["shift_id"]) for r in data["demand"]
+                                           if int(r["required"]) > 0})
+                    active_people = {e["id"]: e["name"] for e in data["employees"] if e.get("active", True)}
+                    source_names = {assignment_key(r): r.get("Controleur", r["Personeelsnr"])
+                                    for r in plan.assignments
+                                    if r.get("Soort") != "Zelfstandige taak"
+                                    and not str(r.get("Dienstnummer", "")).startswith("TAAK:")}
+                    queue_key = f"manual_v023_edits_{data['year']}_{data['month']}_{plan_record['id']}"
+                    edits = st.session_state.setdefault(queue_key, [])
+                    modes = {
+                        "Dienst toevoegen": "add",
+                        "Dienst vervangen": "replace",
+                        "Dienst verwijderen": "remove",
+                        "Bestaande dienst behouden": "keep",
+                    }
+                    mode_label = st.radio("Welke bewerking wil je klaarzetten?", list(modes),
+                                          horizontal=True, key=f"manual_v023_mode_{plan_record['id']}")
+                    mode = modes[mode_label]
+                    with st.form(f"manual_v023_add_form_{plan_record['id']}"):
+                        selected_old = None
+                        selected_slot = None
+                        new_employee = None
+                        if mode != "add":
+                            selected_old = st.selectbox(
+                                "Bestaande toewijzing", original_keys,
+                                format_func=lambda k: f"{k[0]} · {k[1]} · {source_names.get(k, k[2])} ({k[2]})",
+                                disabled=not original_keys)
+                        else:
+                            selected_slot = st.selectbox(
+                                "Datum en dienstnummer", demand_slots,
+                                format_func=lambda x: f"{x[0]} · {x[1]}", disabled=not demand_slots)
+                        if mode in ("add", "replace"):
+                            new_employee = st.selectbox(
+                                "Controleur toewijzen", list(active_people),
+                                format_func=lambda eid: f"{active_people[eid]} ({eid})",
+                                disabled=not active_people)
+                        queue_add = st.form_submit_button(
+                            "➕ Zet bewerking op de lijst",
+                            disabled=(len(edits) >= MAX_EDITS or
+                                      (mode != "add" and not original_keys) or
+                                      (mode == "add" and not demand_slots) or
+                                      (mode in ("add", "replace") and not active_people)))
+                    if queue_add:
+                        try:
+                            source = (dict(zip(("Datum", "Dienstnummer", "Personeelsnr"), selected_old))
+                                      if selected_old is not None else None)
+                            target = None
+                            if mode in ("add", "replace"):
+                                slot = selected_slot if mode == "add" else selected_old[:2]
+                                target = {"Datum": slot[0], "Dienstnummer": slot[1],
+                                          "Personeelsnr": new_employee}
+                            if mode == "replace" and source["Personeelsnr"] == new_employee:
+                                raise ValueError("Kies een andere controleur, of gebruik 'Behouden'.")
+                            edits.append({"kind": mode, "source": source, "target": target})
+                            st.rerun()
+                        except ValueError as error:
+                            st.error(str(error))
+                    if edits:
+                        st.markdown("**Klaargezette wijzigingen**")
+                        st.dataframe(pd.DataFrame([
+                            {"Nr.": i + 1, "Bewerking": edit_description(edit, active_people)}
+                            for i, edit in enumerate(edits)]), hide_index=True, use_container_width=True)
+                        undo_col, clear_col = st.columns(2)
+                        with undo_col:
+                            choice = st.selectbox("Bewerking terugdraaien", range(len(edits)),
+                                                  format_func=lambda i: f"{i+1}. {edit_description(edits[i], active_people)}",
+                                                  key=f"manual_v023_undo_{plan_record['id']}")
+                            if st.button("↩️ Verwijder gekozen bewerking", key=f"manual_v023_remove_{plan_record['id']}"):
+                                edits.pop(choice)
+                                st.rerun()
+                        with clear_col:
+                            if st.button("🗑️ Wis volledige bewerkingslijst", key=f"manual_v023_clear_{plan_record['id']}"):
+                                edits.clear()
+                                st.rerun()
+                        preserve = st.checkbox(
+                            "Behoud alle andere bestaande reguliere toewijzingen (aanbevolen)",
+                            value=True, key=f"manual_v023_preserve_{plan_record['id']}")
+                        st.caption("Bij uitvinken mag de solver ook de niet-bewerkte diensten "
+                                   "herschikken om een geldige planning te vinden. "
+                                   "Bij verwijderen wordt alleen de oude persoon-dienstcombinatie verboden; "
+                                   "de dienstplaats zelf blijft beschikbaar.")
+                        compiled = None
+                        try:
+                            compiled = compile_edits(data, plan.assignments, edits, preserve)
+                            st.success(f"Bewerkingslijst geldig: {compiled['edit_count']} wijziging(en), "
+                                       f"{len(compiled['locked'])} vaste en {len(compiled['excluded'])} "
+                                       "verboden toewijzing(en). De volledige arbeidsregels worden "
+                                       "nog door de solver gecontroleerd.")
+                        except ValueError as error:
+                            st.warning(f"Bewerkingslijst nog niet uitvoerbaar: {error}")
+                        ack = st.checkbox("Ik begrijp dat dit uitsluitend een nieuw concept maakt.",
+                                          key=f"manual_v023_ack_{plan_record['id']}")
+                        if st.button("🔍 Controleer wijzigingen en maak nieuw concept",
+                                     type="primary", key=f"manual_v023_apply_{plan_record['id']}",
+                                     disabled=not (compiled is not None and ack and not errors)):
+                            try:
+                                with st.spinner("Alle vaste en verboden toewijzingen en arbeidsregels controleren…"):
+                                    calc_data = apply_published_history(data, historic) if auto_history else data
+                                    calc_data = with_boundary_context(calc_data, boundary_context)
+                                    new_plan = solve_month(
+                                        calc_data,
+                                        locked_assignments=compiled["locked"],
+                                        excluded_assignments=compiled["excluded"])
+                                    if new_plan.status not in ("OPTIMAL", "FEASIBLE"):
+                                        raise ValueError("Geen geldige planning met deze wijzigingen. "
+                                                         "De oorspronkelijke versie blijft bestaan.")
+                                    changes = reoptimization_diff(plan.assignments, new_plan.assignments,
+                                                                  compiled["locked"])
+                                    if not changes["alle_vaste_behouden"]:
+                                        raise ValueError("Niet alle vastgezette diensten staan in het nieuwe rooster.")
+                                    actual_keys = {assignment_key(r) for r in regular_assignments(new_plan.assignments)}
+                                    if any(assignment_key(r) in actual_keys for r in compiled["excluded"]):
+                                        raise ValueError("Een verwijderde dienst is toch teruggekeerd.")
+                                    new_plan.summary.update({
+                                        "boundary_sources": boundary_context["sources"],
+                                        "history_months": len(past_plans),
+                                        "history_lookback": months_back if auto_history else 0,
+                                        "locked_assignments": compiled["locked"],
+                                        "excluded_assignments": compiled["excluded"],
+                                        "manual_edits_v023": list(edits),
+                                        "manual_edit_source": plan_record["id"],
+                                        "manual_edit_count": compiled["edit_count"],
+                                        "reoptimization_diff": changes,
+                                    })
+                                    store.save_plan(engine, data, st.session_state.workspace_revision,
+                                                    asdict(new_plan), current_user["employee_id"],
+                                                    expected_latest_plan_id=plan_record["id"])
+                                edits.clear()
+                                st.session_state.last_plan = new_plan
+                                st.rerun()
+                            except (ValueError, store.ConflictError) as error:
+                                st.error(f"Handmatige roosterbewerking niet opgeslagen: {error}")
+                            except Exception:
+                                logging.exception("MANUAL_V023: handmatige roosterbewerking mislukt")
+                                st.error("De roosterbewerking is mislukt. Je bestaande planning bleef behouden. "
+                                         "Controleer de Streamlit-logboeken op MANUAL_V023.")
+                    else:
+                        st.info("Kies hierboven een bewerking en zet die op de lijst. Je kunt er "
+                                "meerdere toevoegen voordat je de planner laat controleren.")
+
         # v0.22: gedeeltelijk vastzetten en alleen de overige plekken heroptimaliseren.
         # Een nieuwe berekening wordt altijd een NIEUW concept; een bestaande
         # publicatie en haar meldingen worden nooit in-place aangepast.
         if plan_record and PERSISTENT:
-            with st.expander("🔒 Diensten vastzetten en overige heroptimaliseren (v0.22)", expanded=False):
+            with st.expander("🔒 Diensten vastzetten en overige heroptimaliseren (v0.22) — oude methode", expanded=False):
                 st.caption("Kies bestaande toewijzingen die exact moeten blijven staan. "
                            "Andere toewijzingen mogen wisselen. Je kunt ook één nieuwe "
                            "toewijzing handmatig vastzetten. De solver controleert nog steeds "
