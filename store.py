@@ -21,6 +21,7 @@ from months_v012 import period_key, shared_fields, merge_shared, new_month_paylo
 from month_copy_v013 import copy_month_demand_rows
 from requests_v010 import leave_days, absence_credit
 from swap_v011 import make_swap_plan, verify_swap_with_solver
+from hours_v027 import validate_month_regimes, apply_month_regimes, build_balance_preview
 
 
 class SetupError(RuntimeError):
@@ -653,6 +654,9 @@ def save_month_workspace(engine, payload: dict, expected_revision: int, actor: s
         elif who.role not in ("admin", "planner"):
             raise ValueError("Geen toegangsrechten.")
         _approved_leave_protected(s, payload)
+        regime_errors = validate_month_regimes(payload)
+        if regime_errors:
+            raise ValueError(" ".join(regime_errors))
         # Dienstdefinities zijn vanaf v0.26 maandgebonden: wijzig ze nooit
         # via het gedeelde catalogusobject. De andere gedeelde velden
         # (controleurs, taken, regels en optimalisatieprofielen) blijven
@@ -975,11 +979,64 @@ def _verify_marked_result_v025(s, data: dict, result: dict) -> None:
                          "date": str(r["Datum"]), "start": str(r["Begin"]),
                          "end": str(r["Einde"]), "category": str(r["Categorie"]),
                          "source": side})
-    check = verify_plan(data, result, rows)
+    check = verify_plan(apply_month_regimes(data), result, rows)
     if not check["passed"]:
         raise ValueError("Onafhankelijke roostercontrole v0.25 mislukt: "
                          + "; ".join(check["errors"][:5]))
 
+
+
+
+def _assert_hour_sources_v027(s, year: int, month: int, payload: dict) -> None:
+    """Bewaar de bronversies van automatische saldi: geen stille herpublicatie."""
+    sources = (payload.get("summary") or {}).get("hour_sources_v027")
+    if sources is None:
+        return  # Oude of handmatige berekening: geen nieuwe afhankelijkheid.
+    if not isinstance(sources, list) or len(sources) > 12:
+        raise ConflictError("Ongeldige urenbalansbron. Bereken de planning opnieuw.")
+    expected = []
+    cursor = (year - 1, 12) if month == 1 else (year, month - 1)
+    for row in reversed(sources):
+        if not isinstance(row, dict) or (row.get("year"), row.get("month")) != cursor:
+            raise ConflictError("Urenbalansbron is niet aaneengesloten.")
+        key = period_key(*cursor)
+        w = s.get(MonthWorkspace, key)
+        pub = _current_published(s, *cursor)
+        if w is None or pub is None or w.revision != row.get("revision") or pub.id != row.get("plan_id"):
+            raise ConflictError("Een eerdere maand of publicatie voor de urenbalans is gewijzigd. "
+                                "Bereken opnieuw met het actuele saldo.")
+        expected.append(cursor)
+        cursor = (cursor[0]-1, 12) if cursor[1] == 1 else (cursor[0], cursor[1]-1)
+
+
+def published_hour_history_v027(engine, actor: str, year: int, month: int) -> list[dict]:
+    """Alleen bevoegde planners; vorig gepubliceerde rooster en datums per maand."""
+    initialize_months(engine)
+    with session_factory(engine)() as s:
+        who = s.get(Account, actor)
+        if not who or not who.active or who.role not in ("admin", "planner"):
+            raise ValueError("Alleen beheerders mogen teamuren raadplegen.")
+        shared = s.get(SharedCatalog, 1)
+        target_index = year * 12 + month - 1
+        output = []
+        for offset in range(1, 13):
+            idx = target_index - offset
+            y, m = divmod(idx, 12)
+            m += 1
+            if y < 2020:
+                break
+            row = s.get(MonthWorkspace, period_key(y, m))
+            if row is None:
+                break
+            pub = _current_published(s, y, m)
+            if pub is None:
+                break
+            output.append({"year": y, "month": m,
+                           "plan_id": pub.id, "revision": row.revision,
+                           "plan_revision": pub.workspace_revision,
+                           "data": merge_shared(row.payload, shared.payload),
+                           "plan": pub.payload})
+        return list(reversed(output))
 
 def save_plan(engine, data: dict, workspace_revision: int, result: dict, actor: str,
               expected_latest_plan_id: int | None = None) -> int:
@@ -1000,6 +1057,7 @@ def save_plan(engine, data: dict, workspace_revision: int, result: dict, actor: 
                 raise ConflictError("Er is intussen een nieuwere planversie gemaakt. "
                                     "Ververs de pagina en controleer je handmatige wijzigingen opnieuw.")
         _assert_boundary_current(s, int(data["year"]), int(data["month"]), result)
+        _assert_hour_sources_v027(s, int(data["year"]), int(data["month"]), result)
         _verify_marked_result_v025(s, w.payload, result)
         row = PlanningVersion(workspace_revision=workspace_revision, year=data["year"], month=data["month"],
                               author=actor, created_at=now(), payload=result)
@@ -1098,6 +1156,7 @@ def publish_plan(engine, plan_id: int, expected_revision: int, actor: str) -> No
         if row.published_at is not None:
             raise ValueError("Deze versie is al gepubliceerd.")
         _assert_boundary_current(s, row.year, row.month, row.payload)
+        _assert_hour_sources_v027(s, row.year, row.month, row.payload)
         if row.payload.get("status") not in ("OPTIMAL", "FEASIBLE"):
             raise ValueError("Er is geen geldige planning om te publiceren.")
         _verify_marked_result_v025(s, w.payload, row.payload)

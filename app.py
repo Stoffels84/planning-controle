@@ -42,8 +42,10 @@ from validator_v025 import verify_plan
 from activities_v0261 import invalid_activities, remove_invalid_activities
 from shift_edit_v0262 import apply_month_shift
 from activity_move_v0263 import activity_destination, validate_movable_activity
+from hours_v027 import (validate_month_regimes, apply_month_regimes,
+                         build_balance_preview, apply_balance_to_solver)
 
-st.set_page_config(page_title="Controleursplanning | v0.26.4", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Controleursplanning | v0.27", page_icon="📅", layout="wide")
 
 
 def setting(name: str) -> str:
@@ -184,7 +186,7 @@ def plan_excel(plan, state: dict, diagnosis: dict | None = None) -> bytes:
 
 
 def replace_data(updated: dict) -> None:
-    errors = validate_dataset(updated)
+    errors = validate_dataset(updated) + validate_month_regimes(updated)
     if errors:
         st.error("Gegevens niet opgeslagen: " + " ".join(errors))
         st.stop()
@@ -465,7 +467,7 @@ data = st.session_state.project_data
 is_manager = not PERSISTENT or current_user["role"] in ("admin", "planner")
 
 st.title("📅 Controleursplanning")
-st.caption("Proefversie 0.26.2 • Dienstencatalogus per maand • Onafhankelijke roostercontrole • GitHub + Streamlit + Google OR-Tools")
+st.caption("Proefversie 0.27 • Maandregimes en indicatieve urenbalans • GitHub + Streamlit + Google OR-Tools")
 if st.session_state.pop("remote_change_notice", False):
     st.info("Een andere gebruiker heeft intussen gegevens opgeslagen. De nieuwste versie is geladen; controleer je invoer opnieuw.")
 st.warning("**TESTVERSIE — uitsluitend fictieve gegevens.** Niet vrijgegeven voor echte personeelsgegevens of operationele beslissingen. Arbeidsregels zijn nog niet volledig gevalideerd.")
@@ -503,7 +505,7 @@ with st.sidebar:
     st.divider()
     st.caption("Niet gekoppeld aan systemen van De Lijn.")
 
-screens = (["Overzicht", "Controleurs", "Diensten", "Taken", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Planningsregels", "Weekend en maandgrenzen", "Planning", "Roostercontrole", "Optimalisatie vergelijken", "Rapportage en eerlijkheid"]
+screens = (["Overzicht", "Controleurs", "Diensten", "Taken", "Maandbehoefte", "Voorkeuren", "Uren en activiteiten", "Urenbalans", "Planningsregels", "Weekend en maandgrenzen", "Planning", "Roostercontrole", "Optimalisatie vergelijken", "Rapportage en eerlijkheid"]
            if is_manager else ["Mijn planning", "Mijn voorkeuren", "Mijn aanvragen & wijzigingen"])
 if PERSISTENT:
     screens += (["Verlofaanvragen beheren", "Ruilaanvragen beheren", "Roosterwijzigingen", "Publicatiebeheer"] if is_manager else ["Mijn verlofaanvragen", "Mijn ruilaanvragen"])
@@ -1338,6 +1340,68 @@ elif screen == "Planningsregels":
             replace_and_rerun(state)
     st.info("Individuele uitzonderingen stel je in bij **Controleurs → Profiel en beperkingen**. Per categorie geldt de strengste maximumreeks.")
 
+elif screen == "Urenbalans":
+    st.subheader("🧮 Urenbalans en individuele maandregimes (v0.27)")
+    st.warning("Uitsluitend indicatieve TESTUREN: geen officiële registratie van overuren, "
+               "verlof, loon of arbeidsrechten. Controleer het startsaldo altijd zelf.")
+    st.caption("Een maandregeling is onafhankelijk van de gedeelde controleurscatalogus en "
+               "van de uurregeling in andere maanden. Alle saldi gebruiken uitsluitend "
+               "gepubliceerde planningen, nooit concepten.")
+    try:
+        current_regimes = apply_month_regimes(data)
+        history_rows = (store.published_hour_history_v027(
+            engine, current_user["employee_id"], data["year"], data["month"])
+            if PERSISTENT else [])
+        balances = build_balance_preview(data, history_rows)
+        if balances["warnings"]:
+            for notice in balances["warnings"]:
+                st.info(notice)
+        st.dataframe(pd.DataFrame(balances["rows"]), hide_index=True, use_container_width=True)
+        if balances["history"]:
+            with st.expander("Gepubliceerde maandhistoriek en saldoformule"):
+                st.caption("Eindsaldo = startsaldo + planuren + geregistreerde uren − streefuren. "
+                           "Zelfstandige taken zijn niet dubbel meegeteld.")
+                st.dataframe(pd.DataFrame(balances["history"]), hide_index=True,
+                             use_container_width=True)
+        else:
+            st.caption("Nog geen aaneengesloten gepubliceerde voorgaande maanden beschikbaar.")
+        st.divider()
+        st.markdown("#### Maandgebonden urenregeling instellen")
+        if data["employees"]:
+            eid = st.selectbox("Controleur", [e["id"] for e in data["employees"]],
+                               format_func=lambda x: next(e["name"] for e in data["employees"] if e["id"] == x),
+                               key="v027_regime_employee")
+            employee = next(e for e in current_regimes["employees"] if e["id"] == eid)
+            global_profile = next(e for e in data["employees"] if e["id"] == eid)
+            with st.form("monthly_regime_v027"):
+                max_h = st.number_input("Maximum planuren in deze maand", min_value=1.0,
+                                        max_value=250.0, value=float(employee["max_month_hours"]), step=0.5)
+                target_h = st.number_input("Streefuren in deze maand (0 = geen saldoformule)",
+                                           min_value=0.0, max_value=250.0,
+                                           value=float(employee["target_month_hours"]), step=0.5)
+                st.caption(f"Gedeelde standaard: max. {global_profile['max_month_hours']} u, "
+                           f"streef {global_profile['target_month_hours']} u. "
+                           "Dit formulier wijzigt alleen de geselecteerde maand.")
+                apply_button = st.form_submit_button("Maandregime bewaren")
+            if apply_button:
+                if target_h > max_h:
+                    st.error("De streefuren mogen niet boven het maandmaximum liggen.")
+                else:
+                    revised = clone()
+                    revised.setdefault("month_hour_regimes_v027", {})[eid] = {
+                        "target_month_hours": float(target_h), "max_month_hours": float(max_h)}
+                    replace_and_rerun(revised)
+            if eid in data.get("month_hour_regimes_v027", {}):
+                if st.button("Persoonlijk maandregime terugzetten naar standaard", key="reset_regime_v027"):
+                    revised = clone()
+                    revised["month_hour_regimes_v027"].pop(eid, None)
+                    replace_and_rerun(revised)
+    except (ValueError, store.ConflictError) as error:
+        st.error(f"Urenbalans niet beschikbaar: {error}")
+    except Exception:
+        logging.exception("HOURS_V027: maandrapport mislukt")
+        st.error("Urenbalans tijdelijk niet beschikbaar. Bekijk HOURS_V027 in de Streamlit-logboeken.")
+
 elif screen == "Weekend en maandgrenzen":
     st.subheader("Weekend- en maandgrenzen — proefregels")
     st.warning("Dit zijn configureerbare TESTREGELS, geen door De Lijn gevalideerde arbeidstijdregels. "
@@ -1569,7 +1633,7 @@ elif screen == "Planning":
     if int(data["settings"]["time_limit_seconds"]) >= 600:
         st.caption("Bij lange berekeningen: laat dit browsertabblad open. "
                    "Een gesloten sessie of herstart van Streamlit kan de berekening onderbreken.")
-    errors = validate_dataset(data)
+    errors = validate_dataset(apply_month_regimes(data)) + validate_month_regimes(data)
     for error in errors:
         st.error(error)
     auto_history = st.checkbox("Gepubliceerde weekendhistoriek automatisch meewegen", value=PERSISTENT,
@@ -1588,6 +1652,30 @@ elif screen == "Planning":
                                         "Historische weekenddagen": historic[e["id"]]["weekend_days"],
                                         "Gewerkte weekends": historic[e["id"]]["worked_weekends"]}
                                        for e in data["employees"]]), hide_index=True, use_container_width=True)
+    # v0.27 — alleen gepubliceerde maanden vormen een saldo-overdracht.
+    hour_balance_preview = None
+    if PERSISTENT:
+        try:
+            hour_history = store.published_hour_history_v027(
+                engine, current_user["employee_id"], data["year"], data["month"])
+            hour_balance_preview = build_balance_preview(data, hour_history)
+        except Exception:
+            logging.exception("HOURS_V027_PLAN: ophalen historische saldi mislukt")
+            st.warning("Automatische testurenbalans tijdelijk niet beschikbaar.")
+    auto_balance_v027 = st.checkbox(
+        "Automatisch indicatief startsaldo uit gepubliceerde vorige maanden meenemen (v0.27)",
+        value=False, disabled=not bool(hour_balance_preview and hour_balance_preview["available"]),
+        key="plan_auto_balance_v027",
+        help="Alleen voor het ZACHTE urendoel. Geen wettelijke of verplichte saldoverrekening.")
+    if hour_balance_preview:
+        for msg in hour_balance_preview["warnings"]:
+            st.caption(msg)
+        if auto_balance_v027:
+            st.dataframe(pd.DataFrame(hour_balance_preview["rows"]),
+                         hide_index=True, use_container_width=True)
+            st.warning("Deze berekening gebruikt historische startsaldi vanaf handmatige testbasis. "
+                       "Controleer ze voor je een planning publiceert.")
+
     boundary_context = (published_boundary_context(engine, data["year"], data["month"])
                         if PERSISTENT else {"sources": {"previous": None, "next": None}, "assignments": []})
     st.caption("Maandgrenscontrole: " + ", ".join(
@@ -1635,11 +1723,15 @@ elif screen == "Planning":
     if st.button("🚀 Bereken maandplanning", type="primary", disabled=bool(errors)):
         try:
             with st.spinner("OR-Tools zoekt een zo goed mogelijke planning…"):
-                calculation_data = apply_published_history(data, historic) if auto_history else data
+                calculation_data = apply_month_regimes(
+                    apply_published_history(data, historic) if auto_history else data)
+                if auto_balance_v027:
+                    calculation_data = apply_balance_to_solver(
+                        calculation_data, hour_balance_preview["eligible"])
                 calculation_data = with_boundary_context(calculation_data, boundary_context)
                 candidate = solve_month(calculation_data)
                 if candidate.status in ("OPTIMAL", "FEASIBLE"):
-                    check = verify_plan(data, asdict(candidate), boundary_context["assignments"])
+                    check = verify_plan(apply_month_regimes(data), asdict(candidate), boundary_context["assignments"])
                     if not check["passed"]:
                         raise ValueError("Onafhankelijke roostercontrole v0.25 afgekeurd: "
                                          + "; ".join(check["errors"][:5])
@@ -1649,6 +1741,8 @@ elif screen == "Planning":
                 st.session_state.last_plan.summary.update({"boundary_sources": boundary_context["sources"],
                                                            "history_months": len(past_plans),
                                                            "history_lookback": months_back if auto_history else 0})
+                if auto_balance_v027:
+                    st.session_state.last_plan.summary["hour_sources_v027"] = hour_balance_preview["sources"]
                 if PERSISTENT and st.session_state.last_plan.status in ("OPTIMAL", "FEASIBLE"):
                     st.session_state.last_plan_id = store.save_plan(
                         engine, data, st.session_state.workspace_revision,

@@ -37,6 +37,7 @@ def new_month_payload(year: int, month: int, source: dict) -> dict:
     result["year"], result["month"] = year, month
     for key in MONTH_KEYS:
         result[key] = []
+    result["month_hour_regimes_v027"] = {}  # Iedere maand een eigen regime
     # Andere maand-specifieke velden krijgen geen oude inhoud mee.
     return result
 
